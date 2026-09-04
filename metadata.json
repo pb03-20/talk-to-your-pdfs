@@ -1,0 +1,6 @@
+{
+  "name": "Talk to Your PDFs",
+  "description": "Upload multiple PDFs, search and chat with grounded citations, and have live voice conversations with Gemini.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
