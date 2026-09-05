@@ -12,7 +12,7 @@ WORKDIR /app
 COPY package*.json tsconfig*.json vite.config.ts index.html ./
 COPY src/ ./src/
 COPY public/ ./public/
-RUN npm install
+RUN npm ci
 RUN npm run build:client
 
 # Copy backend requirements and install Python dependencies

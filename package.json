@@ -14,7 +14,6 @@
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
-    "@vercel/node": "^12.0.1",
     "@vitejs/plugin-react": "^5.0.4",
     "busboy": "^1.6.0",
     "dotenv": "^17.2.3",

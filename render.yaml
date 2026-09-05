@@ -1,13 +1,16 @@
 services:
   - type: web
     name: talk-to-your-pdfs
-    env: python
-    buildCommand: "./build.sh"
-    startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
+    runtime: docker
+    healthCheckPath: /health
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
-      - key: NODE_VERSION
-        value: 20.10.0
       - key: GEMINI_API_KEY
         sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DATABASE
+        value: rag_database
+      - key: MONGODB_VECTOR_COLLECTION
+        value: document_chunks
+      - key: MONGODB_VECTOR_INDEX
+        value: vector_index

@@ -22,16 +22,16 @@ An interactive web application enabling users to upload multiple large PDFs (inc
 
 ---
 
-## 2. Deploying on Render (100% Free - Unlimited Large File Uploads)
+## 2. Deploying on Render
 
-Deploying on **Render** gives you a full dedicated web service with **NO 4.5 MB serverless upload limit**, real WebSockets, and PyMuPDF document extraction.
+Deploying on **Render** gives you a single persistent Docker web service for the React app and FastAPI backend. It supports PyMuPDF extraction, uploads up to this application's 100 MB per-file limit, and real WebSockets for live voice.
 
 ### Option A: Render Blueprints (Easiest - 1 Click)
 
 1. **Push your code to GitHub**.
 2. Log into [Render.com](https://dashboard.render.com/).
 3. Click **New +** -> **Blueprint**.
-4. Select your GitHub repository. Render will automatically read `render.yaml`.
+4. Select your GitHub repository. Render will automatically read `render.yaml` and build the included Docker image.
 5. Under Environment Variables, set:
    - `GEMINI_API_KEY`: `your_gemini_api_key_here`
 6. Click **Apply**. Render will automatically build the React frontend and deploy the FastAPI backend.
@@ -40,13 +40,12 @@ Deploying on **Render** gives you a full dedicated web service with **NO 4.5 MB 
 
 1. Go to [Render Dashboard](https://dashboard.render.com/) -> **New Web Service**.
 2. Select your repository.
-3. Choose **Python 3** environment.
-4. Set **Build Command**: `./build.sh`
-5. Set **Start Command**: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
+3. Choose **Docker** environment.
+4. Leave the build and start commands empty; the repository `Dockerfile` defines both.
 6. Under Environment Variables, add:
    - `GEMINI_API_KEY`: `your_gemini_api_key_here`
-   - `PYTHON_VERSION`: `3.11.0`
-7. Select **Free Tier** and click **Create Web Service**.
+   - Optional persistence: `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_VECTOR_COLLECTION`, and `MONGODB_VECTOR_INDEX`
+6. Click **Create Web Service**.
 
 ---
 
@@ -78,6 +77,6 @@ Open `http://localhost:3000` in your browser.
 
 ---
 
-## 4. Deploying to Vercel (Optional Serverless Mode)
+## 4. Persistence on Render
 
-If deploying to Vercel, note that Vercel enforces a **4.5 MB HTTP payload limit** for Serverless Functions. PDFs must be under 4.5 MB per upload request when using Vercel serverless functions.
+The service's local workspace file is ephemeral: it can be cleared when Render restarts or redeploys the instance. Set `MONGODB_URI` plus the related `MONGODB_*` variables to keep indexed document chunks in MongoDB Atlas. Do not commit API keys or connection strings.
