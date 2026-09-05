@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y curl gnupg && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+ENV PYTHONPATH=/app/backend
 
 # Copy package files and install frontend dependencies
 COPY package*.json tsconfig*.json vite.config.ts index.html ./
