@@ -5,23 +5,12 @@ Write-Host "====================================================================
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptDir
 
-# Load .env file automatically if present
+# Check .env file
 $envFile = Join-Path $scriptDir ".env"
 if (Test-Path $envFile) {
-    Get-Content $envFile | ForEach-Object {
-        if ($_ -match '^\s*([^#=]+)\s*=\s*(.*)\s*$') {
-            $k = $matches[1].Trim()
-            $v = $matches[2].Trim().Trim('"').Trim("'")
-            [Environment]::SetEnvironmentVariable($k, $v, "Process")
-        }
-    }
-}
-
-if ($env:GEMINI_API_KEY) {
-    Write-Host "✓ GEMINI_API_KEY loaded automatically from .env" -ForegroundColor Green
+    Write-Host "✓ .env file detected (API key will be loaded automatically by FastAPI)" -ForegroundColor Green
 } else {
-    Write-Host "`nWARNING: GEMINI_API_KEY is not set in environment or .env!" -ForegroundColor Yellow
-    Write-Host "Please set your key in .env or PowerShell: `$env:GEMINI_API_KEY='your_api_key'`n" -ForegroundColor Yellow
+    Write-Host "`nWARNING: .env file not found in project root!" -ForegroundColor Yellow
 }
 
 # Find valid Python executable with uvicorn installed
@@ -47,9 +36,7 @@ Write-Host "Using Python: $pythonCmd" -ForegroundColor Gray
 Write-Host "[1/2] Launching Python FastAPI Server on http://localhost:8000 ..." -ForegroundColor Green
 
 $backendPath = Join-Path $scriptDir "backend"
-$cmdBlock = "[Environment]::SetEnvironmentVariable('GEMINI_API_KEY', '$env:GEMINI_API_KEY', 'Process'); Set-Location '$backendPath'; & '$pythonCmd' -m uvicorn main:app --host 0.0.0.0 --port 8000"
-
-Start-Process powershell -ArgumentList "-NoExit", "-Command", $cmdBlock
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$backendPath'; & '$pythonCmd' -m uvicorn main:app --host 0.0.0.0 --port 8000"
 
 Start-Sleep -Seconds 3
 
