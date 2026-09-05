@@ -36,6 +36,10 @@ export class LiveAudioPlayer {
   private nextStartTime: number = 0;
   private isPlaying: boolean = false;
   private activeSources: AudioBufferSourceNode[] = [];
+  // True once server signals the turn is done (no more audio coming)
+  private turnDone: boolean = false;
+  // Safety timer: unblock mic if turnComplete never arrives after audio ends
+  private safetyTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     // Lazy initialized on user interaction
@@ -53,6 +57,12 @@ export class LiveAudioPlayer {
   }
 
   public playChunk(base64Audio: string) {
+    // New audio arriving — cancel any pending safety timer
+    if (this.safetyTimer !== null) {
+      clearTimeout(this.safetyTimer);
+      this.safetyTimer = null;
+    }
+    // DO NOT reset turnDone here — it must survive across chunk arrivals
     try {
       const ctx = this.getContext();
       const arrayBuffer = base64ToArrayBuffer(base64Audio);
@@ -89,6 +99,16 @@ export class LiveAudioPlayer {
         }
         if (this.activeSources.length === 0) {
           this.isPlaying = false;
+          if (this.turnDone) {
+            // Server already said turn is done — fire immediately
+            this._complete();
+          } else {
+            // Wait for turnComplete, but unblock after 2s max (safety net)
+            this.safetyTimer = setTimeout(() => {
+              this.safetyTimer = null;
+              this._complete();
+            }, 2000);
+          }
         }
       };
     } catch (e) {
@@ -96,17 +116,47 @@ export class LiveAudioPlayer {
     }
   }
 
+  /**
+   * Call when the server sends `turnComplete`.
+   * - If audio is still playing: sets flag; completion fires when last chunk ends.
+   * - If audio is already done: fires completion immediately.
+   */
+  public signalTurnComplete() {
+    if (this.safetyTimer !== null) {
+      clearTimeout(this.safetyTimer);
+      this.safetyTimer = null;
+    }
+    if (this.activeSources.length === 0) {
+      this._complete();
+    } else {
+      this.turnDone = true;
+    }
+  }
+
+  private _complete() {
+    this.turnDone = false;
+    if (this.onPlaybackComplete) {
+      this.onPlaybackComplete();
+    }
+  }
+
+  public onPlaybackComplete?: () => void;
+
   public stop() {
+    if (this.safetyTimer !== null) {
+      clearTimeout(this.safetyTimer);
+      this.safetyTimer = null;
+    }
     for (const src of this.activeSources) {
-      try {
-        src.stop();
-      } catch (e) {
-        // source may have already ended
-      }
+      try { src.stop(); } catch (e) { /* already ended */ }
     }
     this.activeSources = [];
     this.nextStartTime = 0;
     this.isPlaying = false;
+    this.turnDone = false;
+    if (this.onPlaybackComplete) {
+      this.onPlaybackComplete();
+    }
   }
 
   public get playing(): boolean {

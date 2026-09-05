@@ -68,12 +68,24 @@ export default function App() {
 
     const fileList = Array.from(files);
 
-    const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB max per file for FastAPI & Cloudflare Tunnel
-    const oversized = fileList.find((f) => f.size > MAX_FILE_SIZE);
-    if (oversized) {
-      const sizeMB = (oversized.size / (1024 * 1024)).toFixed(1);
+    const isVercelDeployment =
+      window.location.hostname.endsWith(".vercel.app") ||
+      window.location.hostname.endsWith(".vercel.sh");
+    // Vercel rejects the complete HTTP request above 4.5 MB before the API
+    // function runs. Leave room for multipart boundaries and metadata.
+    const MAX_UPLOAD_SIZE = isVercelDeployment
+      ? 4 * 1024 * 1024
+      : 100 * 1024 * 1024;
+    const totalSize = fileList.reduce((sum, file) => sum + file.size, 0);
+    const oversized = fileList.find((file) => file.size > MAX_UPLOAD_SIZE);
+    if (oversized || totalSize > MAX_UPLOAD_SIZE) {
+      const affectedFile = oversized || fileList[0];
+      const sizeMB = (affectedFile.size / (1024 * 1024)).toFixed(1);
+      const limitMB = MAX_UPLOAD_SIZE / (1024 * 1024);
       setUploadError(
-        `"${oversized.name}" is ${sizeMB}MB. Maximum supported PDF size is 100MB per file.`
+        isVercelDeployment
+          ? `Vercel accepts up to ${limitMB}MB per upload request. "${affectedFile.name}" is ${sizeMB}MB; upload one smaller PDF at a time or use the local/Render deployment for larger files.`
+          : `"${affectedFile.name}" is ${sizeMB}MB. Maximum supported PDF size is ${limitMB}MB per file.`
       );
       return;
     }
@@ -95,13 +107,26 @@ export default function App() {
 
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error || `Upload failed with status: ${res.status}`);
+        if (res.status === 413 && isVercelDeployment) {
+          throw new Error(
+            "Vercel rejected this upload because its 4.5MB request limit was exceeded. Upload a PDF under 4MB, one at a time, or use the local/Render deployment for larger PDFs."
+          );
+        }
+        throw new Error(errJson.detail || errJson.error || `Upload failed with status: ${res.status}`);
       }
 
       const data = await res.json();
       if (data.documents) {
         setDocuments(data.documents);
         setTotalChunks(data.totalChunks || 0);
+      }
+      if (data.error) {
+        setUploadError(data.error);
+      } else {
+        const errorDoc = data.documents?.find((d: any) => d.status === "error");
+        if (errorDoc) {
+          setUploadError(errorDoc.errorMessage || errorDoc.error || "One or more files failed to process.");
+        }
       }
     } catch (err: any) {
       console.error("Upload error:", err);
@@ -142,6 +167,17 @@ export default function App() {
 
   // Delete a document
   const handleDeleteDocument = async (docId: string) => {
+    // 1. Optimistic removal from UI immediately
+    const prevDocs = documents;
+    const prevChunks = workspaceChunks;
+    const prevTotal = totalChunks;
+
+    const targetDoc = prevDocs.find((d) => d.id === docId);
+    setDocuments((prev) => prev.filter((d) => d.id !== docId));
+    setWorkspaceChunks((prev) => prev.filter((c) => c.docId !== docId));
+    setTotalChunks((prev) => Math.max(0, prev - (targetDoc?.totalChunks || 0)));
+    setUploadError(null);
+
     try {
       const res = await fetch(`/api/documents/${docId}`, {
         method: "DELETE",
@@ -149,14 +185,21 @@ export default function App() {
           "x-workspace-id": workspaceId,
         },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setDocuments(data.documents || []);
-        setTotalChunks(data.totalChunks || 0);
-        setWorkspaceChunks((prev) => prev.filter((c) => c.docId !== docId));
+      if (!res.ok) {
+        throw new Error(`Server responded with ${res.status}`);
+      }
+      const data = await res.json();
+      if (data.documents) {
+        setDocuments(data.documents);
+        setTotalChunks(data.totalChunks ?? 0);
       }
     } catch (err) {
       console.error("Failed to delete document:", err);
+      // Rollback on network failure
+      setDocuments(prevDocs);
+      setWorkspaceChunks(prevChunks);
+      setTotalChunks(prevTotal);
+      alert("Failed to delete document from server. Please try again.");
     }
   };
 

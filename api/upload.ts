@@ -10,6 +10,11 @@ export const config = {
   },
 };
 
+// Vercel rejects request bodies above 4.5 MB before this handler runs. Keep
+// this limit aligned with the client-side guard, while allowing the local
+// Express server to retain its larger upload allowance.
+const MAX_FILE_SIZE = process.env.VERCEL ? 4 * 1024 * 1024 : 100 * 1024 * 1024;
+
 interface ParsedFile {
   fieldname: string;
   filename: string;
@@ -25,7 +30,7 @@ function parseMultipart(req: VercelRequest): Promise<{ files: ParsedFile[]; fiel
     const busboy = Busboy({
       headers: req.headers as Record<string, string>,
       limits: {
-        fileSize: 100 * 1024 * 1024, // 100MB
+        fileSize: MAX_FILE_SIZE,
         files: 30,
       },
     });

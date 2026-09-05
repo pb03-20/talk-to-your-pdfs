@@ -23,9 +23,11 @@ pip install: pymupdf numpy google-genai rank-bm25
 
 import os
 import re
+import time
 import math
 from typing import List, Dict, Any, Tuple, Optional
 from dotenv import load_dotenv
+from pymongo import MongoClient, ASCENDING
 
 load_dotenv()
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
@@ -41,18 +43,342 @@ except ImportError:  # pragma: no cover
     BM25Okapi = None
 
 EMBEDDING_MODEL = "gemini-embedding-2-preview"
-EMBEDDING_FALLBACK_MODEL = "text-embedding-004"
-GENERATION_MODEL = "gemini-2.5-flash"
-# A long-context model lets us skip retrieval entirely for documents that fit,
-# giving genuinely complete knowledge of the book instead of the top-k
-# approximation RAG provides. Verify this model string against Google's
-# current Gemini docs — long-context model names/limits change.
-LONG_CONTEXT_MODEL = "gemini-2.5-pro"
-LONG_CONTEXT_TOKEN_BUDGET = 800_000  # stay well under the model's max context
-                                      # to leave room for the prompt + answer
-                                      # and avoid the quality drop-off some
-                                      # long-context models show near their limit.
+EMBEDDING_FALLBACK_MODEL = "gemini-embedding-001"
+GENERATION_MODEL = "gemini-3.6-flash"
+LONG_CONTEXT_MODEL = "gemini-3.6-flash"
+LONG_CONTEXT_TOKEN_BUDGET = 25_000  # 25k tokens (~25-30 pages) max for full-context bypass;
+                                    # larger corpora automatically use Hybrid Retrieval (BM25 + embeddings)
+                                    # to stay safely below the 250k free tier tokens/min quota.
 FALLBACK_DIM = 384  # dim used ONLY by the local hash fallback, kept distinct
+# --------------------------------------------------------------------------
+# MongoDB Vector Store
+# --------------------------------------------------------------------------
+# Required environment variables:
+#   MONGODB_URI=mongodb+srv://...
+#   MONGODB_DATABASE=your_database
+#   MONGODB_VECTOR_COLLECTION=document_chunks
+#
+# The collection stores:
+#   - the chunk text and document metadata
+#   - the Gemini embedding
+#   - an Atlas Vector Search index can search the "embedding" field
+#
+# Create an Atlas Vector Search index named "vector_index" on the collection
+# with the "embedding" field configured as the vector field. The dimensions
+# must match the Gemini embedding model's output dimensions.
+
+MONGODB_URI = os.environ.get("MONGODB_URI", "")
+MONGODB_DATABASE = os.environ.get("MONGODB_DATABASE", "rag_database")
+MONGODB_VECTOR_COLLECTION = os.environ.get(
+    "MONGODB_VECTOR_COLLECTION", "document_chunks"
+)
+MONGODB_VECTOR_INDEX = os.environ.get("MONGODB_VECTOR_INDEX", "vector_index")
+
+_mongo_client: Optional[MongoClient] = None
+
+
+def mongodb_enabled() -> bool:
+    """Return whether MongoDB persistence has been configured."""
+    return bool(MONGODB_URI)
+
+
+def get_mongo_client() -> MongoClient:
+    """Return a cached MongoDB client."""
+    global _mongo_client
+
+    if not MONGODB_URI:
+        raise RuntimeError(
+            "MONGODB_URI is not set. Add your MongoDB connection string to .env."
+        )
+
+    if _mongo_client is None:
+        _mongo_client = MongoClient(
+            MONGODB_URI,
+            serverSelectionTimeoutMS=10000,
+        )
+
+    return _mongo_client
+
+
+def get_mongo_collection():
+    """Return the MongoDB collection used for vector storage."""
+    client = get_mongo_client()
+    db = client[MONGODB_DATABASE]
+    collection = db[MONGODB_VECTOR_COLLECTION]
+
+    # Normal indexes for filtering/deleting documents.
+    collection.create_index(
+        [("workspace_id", ASCENDING), ("doc_id", ASCENDING)]
+    )
+    collection.create_index([("workspace_id", ASCENDING)])
+
+    return collection
+
+
+def save_chunks_to_mongodb(
+    chunks: List[Dict[str, Any]],
+    generate_embeddings: bool = True,
+) -> int:
+    """
+    Persist document chunks and their Gemini embeddings in MongoDB.
+
+    Each MongoDB document contains:
+      _id, id, workspace_id, doc_id, filename, page_number,
+      chunk_index, text, embedding, embedding_kind.
+
+    Existing chunks with the same `id` are updated rather than duplicated.
+
+    Returns the number of chunks written.
+    """
+    if not chunks:
+        return 0
+
+    collection = get_mongo_collection()
+
+    if generate_embeddings:
+        texts = [c["text"] for c in chunks]
+        embedding_results = embed_texts_batch(texts)
+
+        for chunk, (embedding, embedding_kind) in zip(
+            chunks, embedding_results
+        ):
+            chunk["embedding"] = embedding
+            chunk["embedding_kind"] = embedding_kind
+
+    operations = []
+
+    for chunk in chunks:
+        embedding = chunk.get("embedding")
+        embedding_kind = chunk.get("embedding_kind")
+
+        document = {
+            "_id": chunk["id"],
+            "id": chunk["id"],
+            "workspace_id": str(chunk["workspace_id"]),
+            "doc_id": str(chunk["doc_id"]),
+            "filename": chunk["filename"],
+            "page_number": int(chunk["page_number"]),
+            "chunk_index": int(chunk["chunk_index"]),
+            "text": chunk["text"],
+            "embedding_kind": embedding_kind,
+        }
+
+        # Keep chunks even when Gemini embedding generation falls back. Atlas
+        # simply excludes documents without the indexed vector field, while
+        # the text and metadata remain durable and available to BM25/local
+        # retrieval. Storing a hash vector here would corrupt a Gemini vector
+        # index because it has a different meaning and possibly dimensions.
+        if embedding and embedding_kind == "gemini":
+            document["embedding"] = embedding
+
+        operations.append({
+            "replace_one": {
+                "filter": {"_id": chunk["id"]},
+                "replacement": document,
+                "upsert": True,
+            }
+        })
+
+    if not operations:
+        return 0
+
+    from pymongo import ReplaceOne
+
+    collection.bulk_write([
+        ReplaceOne(
+            operation["replace_one"]["filter"],
+            operation["replace_one"]["replacement"],
+            upsert=operation["replace_one"]["upsert"],
+        )
+        for operation in operations
+    ])
+
+    # A repeated upload may match documents whose values have not changed;
+    # those are still successful writes/synchronizations.
+    return len(operations)
+
+
+def delete_document_chunks_from_mongodb(
+    workspace_id: str,
+    doc_id: str,
+) -> int:
+    """Delete all vector chunks belonging to one document."""
+    collection = get_mongo_collection()
+
+    result = collection.delete_many({
+        "workspace_id": str(workspace_id),
+        "doc_id": str(doc_id),
+    })
+
+    return result.deleted_count
+
+
+def delete_workspace_chunks_from_mongodb(workspace_id: str) -> int:
+    """Delete all vector chunks belonging to a workspace."""
+    collection = get_mongo_collection()
+
+    result = collection.delete_many({
+        "workspace_id": str(workspace_id),
+    })
+
+    return result.deleted_count
+
+
+def vector_search_mongodb(
+    query: str,
+    workspace_id: str,
+    top_k: int = 12,
+    num_candidates: int = 100,
+    target_doc_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Search MongoDB Atlas Vector Search using a Gemini query embedding.
+
+    Requires a MongoDB Atlas Vector Search index named by MONGODB_VECTOR_INDEX.
+    The index must use:
+        path: "embedding"
+        similarity: "cosine"
+    and the correct embedding dimensions for the selected Gemini model.
+    """
+    query_embedding, query_kind = embed_text_gemini(query)
+
+    if query_kind != "gemini":
+        return []
+
+    collection = get_mongo_collection()
+
+    vector_filter: Dict[str, Any] = {
+        "workspace_id": str(workspace_id),
+    }
+
+    if target_doc_id:
+        vector_filter["doc_id"] = str(target_doc_id)
+
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": MONGODB_VECTOR_INDEX,
+                "path": "embedding",
+                "queryVector": query_embedding,
+                "numCandidates": max(num_candidates, top_k),
+                "limit": top_k,
+                "filter": vector_filter,
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "id": 1,
+                "workspace_id": 1,
+                "doc_id": 1,
+                "filename": 1,
+                "page_number": 1,
+                "chunk_index": 1,
+                "text": 1,
+                "embedding": 1,
+                "embedding_kind": 1,
+                "vector_score": {"$meta": "vectorSearchScore"},
+            }
+        },
+    ]
+
+    try:
+        return list(collection.aggregate(pipeline))
+    except Exception as e:
+        raise RuntimeError(
+            "MongoDB Atlas Vector Search failed. Make sure the collection "
+            f"'{MONGODB_VECTOR_COLLECTION}' has a Vector Search index named "
+            f"'{MONGODB_VECTOR_INDEX}' on the 'embedding' field. "
+            f"Original error: {e}"
+        ) from e
+
+
+def load_workspace_chunks_from_mongodb(
+    workspace_id: str,
+) -> List[Dict[str, Any]]:
+    """Load all chunks for a workspace, useful for rebuilding BM25/MMR state."""
+    collection = get_mongo_collection()
+
+    return list(
+        collection.find(
+            {"workspace_id": str(workspace_id)},
+            {
+                "_id": 0,
+                "id": 1,
+                "workspace_id": 1,
+                "doc_id": 1,
+                "filename": 1,
+                "page_number": 1,
+                "chunk_index": 1,
+                "text": 1,
+                "embedding": 1,
+                "embedding_kind": 1,
+            },
+        ).sort([
+            ("filename", ASCENDING),
+            ("page_number", ASCENDING),
+            ("chunk_index", ASCENDING),
+        ])
+    )
+
+
+def hybrid_retrieve_from_mongodb(
+    query: str,
+    workspace_id: str,
+    top_k: int = 12,
+    num_candidates: int = 100,
+    target_doc_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    MongoDB-backed dense retrieval.
+
+    This is useful when the application should not load the complete
+    embedding corpus into RAM. It returns the same general chunk structure
+    used by the existing RAG pipeline.
+    """
+    queries = generate_query_variations(query)
+
+    merged: Dict[str, Dict[str, Any]] = {}
+
+    for q in queries:
+        results = vector_search_mongodb(
+            q,
+            workspace_id=workspace_id,
+            top_k=top_k,
+            num_candidates=num_candidates,
+            target_doc_id=target_doc_id,
+        )
+
+        for rank, chunk in enumerate(results):
+            chunk_id = chunk["id"]
+            rrf_score = 1.0 / (60 + rank + 1)
+
+            if chunk_id not in merged:
+                merged[chunk_id] = dict(chunk)
+                merged[chunk_id]["rrf_score"] = rrf_score
+            else:
+                merged[chunk_id]["rrf_score"] += rrf_score
+
+    ranked = sorted(
+        merged.values(),
+        key=lambda c: c.get("rrf_score", 0.0),
+        reverse=True,
+    )
+
+    # Keep the existing MMR implementation as the final diversity step.
+    query_embedding, query_kind = embed_text_gemini(query)
+
+    if query_kind == "gemini":
+        return mmr_select(
+            query_embedding,
+            ranked,
+            top_k=top_k,
+            max_per_doc=None,
+        )
+
+    return ranked[:top_k]
+
+
                      # on purpose so it can never be silently compared against
                      # a real embedding of a different dimensionality.
 
@@ -92,20 +418,35 @@ def _order_blocks_for_reading(blocks: List[Tuple], page_width: float) -> List[Tu
     return left_col + right_col
 
 
+_OCR_CHECKED = False
+_OCR_AVAILABLE = False
+
+def _check_ocr_available() -> bool:
+    global _OCR_CHECKED, _OCR_AVAILABLE
+    if not _OCR_CHECKED:
+        _OCR_CHECKED = True
+        try:
+            import pytesseract
+            from PIL import Image
+            _OCR_AVAILABLE = True
+        except ImportError:
+            _OCR_AVAILABLE = False
+    return _OCR_AVAILABLE
+
+
 def _ocr_page(page: "fitz.Page") -> str:
     """
     OCRs a page that has no extractable text layer (scanned image PDFs).
-    Requires: pip install pytesseract pillow, and the tesseract binary
-    installed on the host (apt-get install tesseract-ocr). Fails soft —
-    returns "" if OCR isn't available, so the pipeline still works without it,
-    just without text for image-only pages.
+    Fails soft — returns "" if OCR isn't available, so the pipeline still works without it.
     """
+    if not _check_ocr_available():
+        return ""
     try:
         import pytesseract
         from PIL import Image
         import io as _io
 
-        pix = page.get_pixmap(dpi=200)
+        pix = page.get_pixmap(dpi=150)
         img = Image.open(_io.BytesIO(pix.tobytes("png")))
         return pytesseract.image_to_string(img).strip()
     except Exception:
@@ -278,12 +619,13 @@ def embed_text_gemini(text: str) -> Tuple[List[float], str]:
     comparable to other "hash" vectors, never to a real embedding.
     """
     client = get_gemini_client()
+    contents = [types.Content(parts=[types.Part.from_text(text=text[:8000])])]
     try:
         res = client.models.embed_content(
             model=EMBEDDING_MODEL,
-            contents=text[:8000],
+            contents=contents,
         )
-        if getattr(res, "embeddings", None):
+        if getattr(res, "embeddings", None) and res.embeddings:
             return res.embeddings[0].values, "gemini"
     except Exception:
         pass
@@ -291,16 +633,15 @@ def embed_text_gemini(text: str) -> Tuple[List[float], str]:
     try:
         res = client.models.embed_content(
             model=EMBEDDING_FALLBACK_MODEL,
-            contents=text[:8000],
+            contents=contents,
         )
-        if getattr(res, "embeddings", None):
+        if getattr(res, "embeddings", None) and res.embeddings:
             return res.embeddings[0].values, "gemini"
     except Exception:
         pass
 
     # Local hash fallback — deliberately low quality but keeps the app
-    # functional if the embedding API is down. Tagged as "hash" so it never
-    # gets silently mixed with real embeddings during retrieval.
+    # functional if the embedding API is down or quota is reached.
     vec = np.zeros(FALLBACK_DIM, dtype=np.float32)
     for i, w in enumerate(text.lower().split()):
         h = abs(hash(w)) % FALLBACK_DIM
@@ -311,9 +652,11 @@ def embed_text_gemini(text: str) -> Tuple[List[float], str]:
     return vec.tolist(), "hash"
 
 
-def embed_texts_batch(texts: List[str], batch_size: int = 20) -> List[Tuple[List[float], str]]:
-    """Embeds a list of texts using batching (20 items per API call) to avoid payload overload
-    and eliminate slow sequential retries."""
+def embed_texts_batch(texts: List[str], batch_size: int = 25) -> List[Tuple[List[float], str]]:
+    """Embeds a list of texts using batching (25 items per API call) with types.Content
+    so the Gemini SDK embeds all items in a single request.
+    If the API is down or rate limits are reached, seamlessly falls back to hash embeddings
+    so file upload never hangs or times out."""
     if not texts:
         return []
     results: List[Tuple[List[float], str]] = []
@@ -322,10 +665,16 @@ def embed_texts_batch(texts: List[str], batch_size: int = 20) -> List[Tuple[List
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
         succeeded = False
+        contents = [
+            types.Content(parts=[types.Part.from_text(text=t[:4000])])
+            for t in batch
+        ]
+
+        # Primary batch attempt
         try:
             res = client.models.embed_content(
                 model=EMBEDDING_MODEL,
-                contents=[t[:4000] for t in batch],
+                contents=contents,
             )
             if getattr(res, "embeddings", None) and len(res.embeddings) == len(batch):
                 results.extend([(e.values, "gemini") for e in res.embeddings])
@@ -333,9 +682,34 @@ def embed_texts_batch(texts: List[str], batch_size: int = 20) -> List[Tuple[List
         except Exception:
             pass
 
+        # Fallback batch model attempt
+        if not succeeded:
+            try:
+                res = client.models.embed_content(
+                    model=EMBEDDING_FALLBACK_MODEL,
+                    contents=contents,
+                )
+                if getattr(res, "embeddings", None) and len(res.embeddings) == len(batch):
+                    results.extend([(e.values, "gemini") for e in res.embeddings])
+                    succeeded = True
+            except Exception:
+                pass
+
+        # Instant local hash fallback if API quota or connection failed
         if not succeeded:
             for t in batch:
-                results.append(embed_text_gemini(t))
+                vec = np.zeros(FALLBACK_DIM, dtype=np.float32)
+                for idx, w in enumerate(t.lower().split()):
+                    h = abs(hash(w)) % FALLBACK_DIM
+                    vec[h] += 1.0 / (idx + 1)
+                norm = np.linalg.norm(vec)
+                if norm > 0:
+                    vec /= norm
+                results.append((vec.tolist(), "hash"))
+
+        # Brief polite delay between batches to stay comfortably within rate limits
+        if i + batch_size < len(texts):
+            time.sleep(0.08)
 
     return results
 
@@ -499,38 +873,97 @@ def mmr_select(
     return selected
 
 
+def detect_targeted_document(query: str, documents: List[Dict[str, Any]]) -> Optional[str]:
+    """
+    Detects if the user is asking about a specific book or document in the library.
+    Checks for distinctive keywords from filenames.
+    """
+    if not documents or len(documents) <= 1:
+        return None
+
+    q_lower = query.lower()
+    best_doc_id = None
+    best_match_score = 0
+
+    stop_words = {"the", "a", "an", "and", "or", "of", "in", "to", "for", "with", "on", "at", "by", "from", "pdf", "book", "author", "1lib", "z-lib", "sk", "edition"}
+
+    for doc in documents:
+        fname = doc.get("filename", "").lower()
+        clean_name = re.sub(r"\.(pdf|epub|txt)$", "", fname)
+        clean_name = re.sub(r"\(.*?\)", "", clean_name)
+        words = [w for w in re.findall(r"[a-z0-9]{3,}", clean_name) if w not in stop_words]
+
+        matches = sum(1 for w in words if w in q_lower)
+        if matches >= 1 and matches > best_match_score:
+            best_match_score = matches
+            best_doc_id = doc["id"]
+
+    return best_doc_id
+
+
+def expand_neighbor_chunks(
+    selected_chunks: List[Dict[str, Any]],
+    all_chunks: List[Dict[str, Any]],
+    max_total_chunks: int = 18,
+) -> List[Dict[str, Any]]:
+    """
+    For retrieved chunks, stitches adjacent chunks from the same document
+    so paragraphs, code, and thoughts are continuous and coherent.
+    """
+    if not selected_chunks or not all_chunks:
+        return selected_chunks
+
+    chunk_map = {(c["doc_id"], c["chunk_index"]): c for c in all_chunks}
+    expanded_dict = {c["id"]: c for c in selected_chunks}
+
+    for c in selected_chunks:
+        if len(expanded_dict) >= max_total_chunks:
+            break
+        doc_id = c["doc_id"]
+        c_idx = c["chunk_index"]
+        next_chunk = chunk_map.get((doc_id, c_idx + 1))
+        if next_chunk and next_chunk["id"] not in expanded_dict:
+            expanded_dict[next_chunk["id"]] = next_chunk
+
+    return sorted(expanded_dict.values(), key=lambda x: (x["filename"], x["page_number"], x["chunk_index"]))
+
+
 def hybrid_retrieve(
     query: str,
     chunks: List[Dict[str, Any]],
     bm25_index: Optional[WorkspaceBM25Index],
-    top_k: int = 8,
+    top_k: int = 12,
     candidate_pool: Optional[int] = None,
     use_query_expansion: bool = True,
     max_per_doc: Optional[int] = None,
+    target_doc_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Full retrieval pipeline:
-      1. Expand the query into a few paraphrases (vocabulary mismatch fix).
-      2. For each phrasing, get BM25 candidates + embedding candidates.
-      3. RRF-fuse everything into one ranking.
-      4. MMR diversity re-rank down to top_k chunks, capped per document so
-         a workspace with many PDFs doesn't have its answer dominated by
-         whichever single document is largest or most superficially similar.
-
-    candidate_pool and max_per_doc auto-scale with how many distinct
-    documents are in the workspace when not given explicitly — a single-PDF
-    workspace and a 30-PDF workspace need very different search widths.
+      1. Book-aware filtering if a specific book is targeted.
+      2. Paraphrased query expansion for vocabulary coverage.
+      3. BM25 keyword matching + dense Gemini embeddings.
+      4. Reciprocal Rank Fusion (RRF).
+      5. Maximal Marginal Relevance (MMR) re-ranking for diversity.
+      6. Adjacent chunk expansion for continuous context.
     """
     if not chunks:
         return []
 
-    num_docs = len({c["doc_id"] for c in chunks})
+    search_chunks = chunks
+    active_bm25 = bm25_index
+
+    if target_doc_id:
+        doc_specific_chunks = [c for c in chunks if c["doc_id"] == target_doc_id]
+        if len(doc_specific_chunks) >= 3:
+            search_chunks = doc_specific_chunks
+            active_bm25 = WorkspaceBM25Index(search_chunks)
+
+    num_docs = len({c["doc_id"] for c in search_chunks})
     if candidate_pool is None:
-        candidate_pool = max(25, min(200, num_docs * 8))
+        candidate_pool = max(35, min(300, num_docs * 15))
     if max_per_doc is None:
-        # Leave room for at least 2-3 distinct documents to contribute when
-        # there are several in play; no cap for a single-document workspace.
-        max_per_doc = top_k if num_docs <= 1 else max(2, top_k // min(num_docs, 4))
+        max_per_doc = top_k if num_docs <= 1 else max(3, top_k // min(num_docs, 3))
 
     queries = generate_query_variations(query) if use_query_expansion else [query]
 
@@ -543,22 +976,25 @@ def hybrid_retrieve(
             primary_embedding, primary_kind = q_embedding, q_kind
 
         embedding_ranked = sorted(
-            chunks,
+            search_chunks,
             key=lambda c: cosine_similarity(q_embedding, c["embedding"])
             if q_kind == c.get("embedding_kind") else 0.0,
             reverse=True,
         )[:candidate_pool]
         ranked_lists.append(embedding_ranked)
 
-        if bm25_index:
-            ranked_lists.append([c for c, _ in bm25_index.top_n(q, candidate_pool)])
+        if active_bm25:
+            ranked_lists.append([c for c, _ in active_bm25.top_n(q, candidate_pool)])
 
     fused = reciprocal_rank_fusion(ranked_lists)
     fused_chunks = [c for c, _ in fused][:candidate_pool]
 
     if primary_kind == "gemini":
-        return mmr_select(primary_embedding, fused_chunks, top_k=top_k, max_per_doc=max_per_doc)
-    return fused_chunks[:top_k]
+        selected = mmr_select(primary_embedding, fused_chunks, top_k=top_k, max_per_doc=max_per_doc)
+    else:
+        selected = fused_chunks[:top_k]
+
+    return expand_neighbor_chunks(selected, search_chunks, max_total_chunks=top_k + 4)
 
 
 # --------------------------------------------------------------------------
@@ -648,53 +1084,66 @@ def looks_like_overview_query(query: str) -> bool:
 # --------------------------------------------------------------------------
 
 TEACHER_PERSONA_PROMPT = (
-    "You are a patient, encouraging teacher who knows these documents deeply. "
-    "Explain things the way a good tutor would in a one-on-one session: warm, "
-    "clear, and genuinely engaged with helping the person understand — not a "
-    "search engine reading back snippets. Build on what the person already "
-    "seems to know from their question. Use a concrete example or analogy "
-    "from the material when it helps a concept click. If a topic naturally "
-    "has more depth, offer to go further rather than dumping everything at "
-    "once ('That's the core idea — want me to go into how X works in more "
-    "detail?'). Keep the warmth even when the answer is 'this isn't covered "
-    "in the documents.'"
+    "You are an author-level scholar and master tutor with deep knowledge of the uploaded books and documents.\n\n"
+    "YOUR CORE TEACHING MISSION:\n"
+    "When the user asks anything about the book(s), explain it with absolute conceptual clarity, "
+    "depth, and structure. Never give shallow answers, vague teasers, or robotic snippets. "
+    "Explain things the way an exceptional professor or senior engineer breaks down complex concepts "
+    "so that anyone can grasp the intuition, the underlying mechanics, and the practical application.\n\n"
+    "EXPLANATION GUIDELINES:\n"
+    "1. Direct & Intuitive Lead: Immediately answer the core question in plain English with an intuitive overview.\n"
+    "2. Comprehensive Breakdown: Break the topic down using clear Markdown headings (###), bolded terms, "
+    "and bullet points or numbered steps. Cover the 'why', the 'how', and trade-offs/nuances.\n"
+    "3. Real Examples & Analogies: Use concrete examples, code, formulas, or analogies directly from the text to make ideas click.\n"
+    "4. Rigorous Grounding & Citations: Ground every assertion in the provided PDF text and always cite "
+    "the exact document filename and page number: `[Filename — Page X]`.\n"
+    "5. Follow Format Intent: Match the structure the user asked for (tables, numbered steps, deep dive, or summaries)."
 )
 
 _BULLET_PATTERN = re.compile(r"\b(bullet|list it|as a list|point[s]? form|itemi[sz]e)\b", re.IGNORECASE)
-_STEPS_PATTERN = re.compile(r"\b(step[- ]by[- ]step|steps to|how do i|walk me through|instructions)\b", re.IGNORECASE)
-_TABLE_PATTERN = re.compile(r"\b(table|compare|comparison|side by side|vs\.?|versus)\b", re.IGNORECASE)
+_STEPS_PATTERN = re.compile(r"\b(step[- ]by[- ]step|steps to|how do i|walk me through|instructions|process|procedure)\b", re.IGNORECASE)
+_TABLE_PATTERN = re.compile(r"\b(table|compare|comparison|side by side|vs\.?|versus|matrix)\b", re.IGNORECASE)
 _SHORT_PATTERN = re.compile(r"\b(short|brief|quick(ly)?|tl;?dr|one sentence|in a nutshell|concise(ly)?)\b", re.IGNORECASE)
 _DETAILED_PATTERN = re.compile(r"\b(detail(ed)?|in depth|deep dive|thoroughly|explain (fully|everything)|comprehensive)\b", re.IGNORECASE)
 
 
 def build_format_instruction(query: str) -> str:
     """
-    Reads the user's literal phrasing for formatting intent and returns an
-    explicit instruction for it. When nothing is signaled, the default is
-    plain conversational prose — bullets/headers are the exception the user
-    has to ask for, not the model's default output shape.
+    Translates user phrasing and query intent into explicit formatting instructions
+    so responses are structured, clean, and directly fit the user's need.
     """
     q = query.lower()
     instructions = []
 
-    if _BULLET_PATTERN.search(q):
-        instructions.append("Format the answer as a bulleted list.")
-    elif _STEPS_PATTERN.search(q):
-        instructions.append("Format the answer as clearly numbered steps.")
-    elif _TABLE_PATTERN.search(q):
-        instructions.append("Format the comparison as a markdown table.")
-
-    if _SHORT_PATTERN.search(q):
-        instructions.append("Keep the whole answer to 2-3 sentences — the person wants brevity.")
-    elif _DETAILED_PATTERN.search(q):
-        instructions.append("Go deep — the person explicitly wants a thorough, detailed explanation.")
-
-    if not instructions:
-        return (
-            "No format was requested — respond in natural, flowing prose like you're "
-            "talking the person through it, the way a teacher explains something out "
-            "loud. Only reach for bullet points, numbered steps, or headers if the "
-            "content is genuinely a list, sequence, or comparison where prose would "
-            "be harder to follow than structure — not as a default habit."
+    if _TABLE_PATTERN.search(q):
+        instructions.append(
+            "FORMAT REQUIREMENT: Format the answer primarily as a clear, well-organized Markdown comparison table "
+            "with informative column headers, accompanied by a concise explanatory summary and page citations."
         )
+    elif _STEPS_PATTERN.search(q):
+        instructions.append(
+            "FORMAT REQUIREMENT: Format the answer as numbered step-by-step instructions (1, 2, 3...), "
+            "with clear explanations of each step's objective, action, and rationale."
+        )
+    elif _BULLET_PATTERN.search(q):
+        instructions.append(
+            "FORMAT REQUIREMENT: Format the key principles or findings as a clean bulleted list with bolded headings "
+            "and in-depth explanations for each point."
+        )
+    elif _SHORT_PATTERN.search(q):
+        instructions.append(
+            "FORMAT REQUIREMENT: Provide a concise executive answer in 2-3 focused sentences with exact citations."
+        )
+    elif _DETAILED_PATTERN.search(q) or any(w in q for w in ["explain", "how", "what is", "why", "breakdown", "guide", "understand"]):
+        instructions.append(
+            "FORMAT REQUIREMENT: Provide a rich, structured pedagogical explanation. Start with an executive summary, "
+            "followed by detailed subheadings (###), bulleted breakdowns of mechanisms and concepts, "
+            "concrete examples from the book, and exact page citations."
+        )
+    else:
+        instructions.append(
+            "FORMAT REQUIREMENT: Deliver a clear, well-structured explanation using subheadings (###) and bulleted points "
+            "where helpful, supported by concrete examples from the book and exact page citations."
+        )
+
     return " ".join(instructions)

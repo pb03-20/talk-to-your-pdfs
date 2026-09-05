@@ -36,7 +36,7 @@ Write-Host "Using Python: $pythonCmd" -ForegroundColor Gray
 Write-Host "[1/2] Launching Python FastAPI Server on http://localhost:8000 ..." -ForegroundColor Green
 
 $backendPath = Join-Path $scriptDir "backend"
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$backendPath'; & '$pythonCmd' -m uvicorn main:app --host 0.0.0.0 --port 8000"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$backendPath'; & '$pythonCmd' -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
 
 Start-Sleep -Seconds 3
 

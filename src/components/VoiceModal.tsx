@@ -54,6 +54,12 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
   const playerRef = useRef<LiveAudioPlayer | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const isMutedRef = useRef(false);
+  const recognitionRef = useRef<any>(null);
+
+      const isAiSpeakingRef = useRef(false);
+  useEffect(() => {
+    isAiSpeakingRef.current = isAiSpeaking;
+  }, [isAiSpeaking]);
 
   useEffect(() => {
     isMutedRef.current = isMuted;
@@ -103,9 +109,17 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
       playerRef.current = null;
     }
 
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {}
+      recognitionRef.current = null;
+    }
+
     setIsConnected(false);
     setIsConnecting(false);
     setIsAiSpeaking(false);
+    isAiSpeakingRef.current = false;
   };
 
   const startLiveSession = async () => {
@@ -145,6 +159,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
             sampleRate: 16000,
             echoCancellation: true,
             noiseSuppression: true,
+            autoGainControl: true,
           },
         });
       } catch (micErr: any) {
@@ -169,10 +184,52 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
 
       // 3. Initialize audio player (24kHz)
       playerRef.current = new LiveAudioPlayer();
+      playerRef.current.onPlaybackComplete = () => {
+        setIsAiSpeaking(false);
+        isAiSpeakingRef.current = false;
+        if (inputAudioCtxRef.current && inputAudioCtxRef.current.state === "suspended") {
+          inputAudioCtxRef.current.resume().catch(() => {});
+        }
+        setStatusMessage("Listening... Speak naturally to ask about your PDFs.");
+      };
+
+      // Optional browser speech recognition for real-time user voice transcript
+      const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRec) {
+        try {
+          const rec = new SpeechRec();
+          rec.continuous = true;
+          rec.interimResults = true;
+          rec.lang = "en-US";
+          rec.onresult = (evt: any) => {
+            let fullText = "";
+            for (let i = evt.resultIndex; i < evt.results.length; i++) {
+              fullText += evt.results[i][0].transcript;
+            }
+            if (fullText.trim()) {
+              appendTranscript("user", fullText.trim());
+            }
+          };
+          rec.onend = () => {
+            if (isOpen && !isMutedRef.current && recognitionRef.current) {
+              try {
+                rec.start();
+              } catch (e) {}
+            }
+          };
+          rec.start();
+          recognitionRef.current = rec;
+        } catch (recErr) {
+          console.warn("Speech recognition optional error:", recErr);
+        }
+      }
 
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
       const inputCtx = new AudioCtxClass({ sampleRate: 16000 });
       inputAudioCtxRef.current = inputCtx;
+      if (inputCtx.state === "suspended") {
+        inputCtx.resume().catch(() => {});
+      }
 
       const source = inputCtx.createMediaStreamSource(stream);
       // 4096 buffer size at 16kHz is ~256ms chunk
@@ -192,12 +249,26 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
         setIsConnecting(false);
         setIsConnected(true);
         setStatusMessage("Listening... Speak naturally to ask about your PDFs.");
+        if (inputCtx.state === "suspended") {
+          inputCtx.resume().catch(() => {});
+        }
 
         // Hook up audio processor once connected
         processor.onaudioprocess = (e) => {
-          if (isMutedRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+          // Do not send mic audio if muted or while AI is speaking (prevents speaker echo from interrupting the AI)
+          if (
+            isMutedRef.current ||
+            isAiSpeakingRef.current ||
+            !wsRef.current ||
+            wsRef.current.readyState !== WebSocket.OPEN
+          ) {
             return;
           }
+
+          if (inputCtx.state === "suspended") {
+            inputCtx.resume().catch(() => {});
+          }
+
           const inputData = e.inputBuffer.getChannelData(0);
           const pcmBuffer = floatTo16BitPCM(inputData);
           const base64Audio = arrayBufferToBase64(pcmBuffer);
@@ -222,15 +293,34 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
             setStatusMessage(data.message || "Connected");
           } else if (data.type === "audio" && data.audio) {
             setIsAiSpeaking(true);
+            isAiSpeakingRef.current = true;
             playerRef.current?.playChunk(data.audio);
-          } else if (data.type === "outputTranscript" && data.text) {
+          } else if ((data.type === "outputTranscript" || data.type === "text") && data.text) {
             appendTranscript("gemini", data.text);
           } else if (data.type === "inputTranscript" && data.text) {
             appendTranscript("user", data.text);
+          } else if (data.type === "turnComplete") {
+            // Tell the player the turn is done. It will fire onPlaybackComplete
+            // once the audio queue fully drains — preventing mic from opening
+            // while the speaker is still playing (echo feedback).
+            if (playerRef.current) {
+              playerRef.current.signalTurnComplete();
+            } else {
+              setIsAiSpeaking(false);
+              isAiSpeakingRef.current = false;
+              if (inputAudioCtxRef.current && inputAudioCtxRef.current.state === "suspended") {
+                inputAudioCtxRef.current.resume().catch(() => {});
+              }
+              setStatusMessage("Listening... Speak naturally to ask about your PDFs.");
+            }
           } else if (data.type === "interrupted") {
             playerRef.current?.stop();
             setIsAiSpeaking(false);
-            setStatusMessage("Interrupted. Listening for your voice...");
+            isAiSpeakingRef.current = false;
+            if (inputAudioCtxRef.current && inputAudioCtxRef.current.state === "suspended") {
+              inputAudioCtxRef.current.resume().catch(() => {});
+            }
+            setStatusMessage("Listening... Speak naturally to ask about your PDFs.");
           } else if (data.type === "error") {
             setErrorMessage(data.message || "Live API error");
           }
@@ -289,9 +379,9 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
     }
     setIsAiSpeaking(false);
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "text", text: "(interrupted by user)" }));
+      wsRef.current.send(JSON.stringify({ type: "interrupt" }));
     }
-    setStatusMessage("Interrupted. Listening to you...");
+    setStatusMessage("Listening... Speak naturally to ask about your PDFs.");
   };
 
   const toggleMute = () => {

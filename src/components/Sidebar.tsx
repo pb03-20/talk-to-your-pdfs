@@ -94,9 +94,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       <aside
         id="sidebar-documents"
-        className={`fixed md:static inset-y-0 left-0 w-80 bg-zinc-50 border-r border-zinc-200 flex flex-col z-40 transition-transform duration-300 ease-in-out md:translate-x-0 ${
-          isOpen ? "translate-x-0 shadow-xl" : "-translate-x-full"
-        }`}
+        className={`fixed md:static inset-y-0 left-0 w-80 bg-zinc-50 border-r border-zinc-200 flex flex-col z-40 transition-transform duration-300 ease-in-out md:translate-x-0 ${isOpen ? "translate-x-0 shadow-xl" : "-translate-x-full"
+          }`}
       >
         {/* Sidebar Header */}
         <div className="p-4 border-b border-zinc-200 flex items-center justify-between bg-white">
@@ -121,11 +120,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
-            className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition-all ${
-              isDragOver
-                ? "border-zinc-900 bg-zinc-100"
-                : "border-zinc-300 hover:border-zinc-400 hover:bg-zinc-50/70 bg-zinc-50/40"
-            }`}
+            className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition-all ${isDragOver
+              ? "border-zinc-900 bg-zinc-100"
+              : "border-zinc-300 hover:border-zinc-400 hover:bg-zinc-50/70 bg-zinc-50/40"
+              }`}
           >
             <input
               ref={fileInputRef}
@@ -256,11 +254,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                   <button
                     id={`btn-delete-doc-${doc.id}`}
-                    onClick={() => onDeleteDocument(doc.id)}
-                    title="Remove PDF"
-                    className="p-1 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors ml-1"
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      onDeleteDocument(doc.id);
+                    }}
+                    title="Remove PDF from workspace"
+                    aria-label={`Remove ${doc.filename}`}
+                    className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 active:bg-rose-100 rounded-lg transition-colors ml-1 shrink-0 cursor-pointer"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
 

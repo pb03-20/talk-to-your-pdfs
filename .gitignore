@@ -8,7 +8,12 @@ coverage/
 !.env.example
 
 .vercel
+
+# Runtime workspace state may contain uploaded document content.
+backend/data/
 __pycache__/
 *.pyc
 venv/
 .venv/
+
+.vercel

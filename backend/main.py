@@ -38,12 +38,18 @@ from rag import (
     fits_full_context,
     summarize_document,
     looks_like_overview_query,
+    detect_targeted_document,
     TEACHER_PERSONA_PROMPT,
     build_format_instruction,
     PDFExtractionError,
     LONG_CONTEXT_MODEL,
     GENERATION_MODEL,
+    mongodb_enabled,
+    save_chunks_to_mongodb,
+    delete_document_chunks_from_mongodb,
+    delete_workspace_chunks_from_mongodb,
 )
+from sample_doc import SAMPLE_DOCUMENT
 
 app = FastAPI(title="Talk to Your PDFs API", version="1.0.0")
 
@@ -89,6 +95,20 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 STORAGE_FILE = os.path.join(DATA_DIR, "workspace_store.json")
 
+import threading
+
+def _write_workspaces_file(data: dict):
+    try:
+        temp_file = STORAGE_FILE + ".tmp"
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, separators=(',', ':'))
+        if os.path.exists(STORAGE_FILE):
+            os.replace(temp_file, STORAGE_FILE)
+        else:
+            os.rename(temp_file, STORAGE_FILE)
+    except Exception as e:
+        print(f"Warning: Failed to save workspaces to disk: {e}")
+
 def save_workspaces_to_disk():
     try:
         serializable = {}
@@ -101,10 +121,10 @@ def save_workspaces_to_disk():
                 "messages": ws.get("messages", []),
                 "summaries": ws.get("summaries", {}),
             }
-        with open(STORAGE_FILE, "w", encoding="utf-8") as f:
-            json.dump(serializable, f, indent=2)
+        t = threading.Thread(target=_write_workspaces_file, args=(serializable,), daemon=True)
+        t.start()
     except Exception as e:
-        print(f"Warning: Failed to save workspaces to disk: {e}")
+        print(f"Warning: Failed to dispatch workspace save: {e}")
 
 def load_workspaces_from_disk():
     if not os.path.exists(STORAGE_FILE):
@@ -137,6 +157,7 @@ class TTSRequest(BaseModel):
     voice: Optional[str] = "Kore"
 
 @app.get("/health")
+@app.get("/api/health")
 def health_check():
     return {"status": "ok", "service": "Talk to Your PDFs FastAPI"}
 
@@ -153,6 +174,8 @@ def get_workspace(x_workspace_id: Optional[str] = Header("default")):
 @app.post("/api/workspace/reset")
 def reset_workspace(x_workspace_id: Optional[str] = Header("default")):
     ws = get_or_create_workspace(x_workspace_id)
+    if mongodb_enabled():
+        delete_workspace_chunks_from_mongodb(x_workspace_id)
     ws["documents"] = []
     ws["chunks"] = []
     ws["summaries"] = {}
@@ -175,6 +198,59 @@ def clear_chat(x_workspace_id: Optional[str] = Header("default")):
     save_workspaces_to_disk()
     return {"success": True, "message": "Chat history cleared."}
 
+@app.post("/api/sample-doc")
+async def load_sample_document(x_workspace_id: Optional[str] = Header("default")):
+    ws = get_or_create_workspace(x_workspace_id)
+    doc_id = f"sample_{int(time.time() * 1000)}"
+
+    try:
+        pages = SAMPLE_DOCUMENT["pages"]
+        chunks = chunk_pages(x_workspace_id, doc_id, SAMPLE_DOCUMENT["filename"], pages)
+
+        texts = [c["text"] for c in chunks]
+        if texts:
+            embeddings = embed_texts_batch(texts)
+            for chunk, (emb_vec, emb_kind) in zip(chunks, embeddings):
+                chunk["embedding"] = emb_vec
+                chunk["embedding_kind"] = emb_kind
+
+        if mongodb_enabled():
+            # Chunks already have embeddings, so do not make a second Gemini
+            # embedding request while saving them.
+            save_chunks_to_mongodb(chunks, generate_embeddings=False)
+
+        ws["chunks"].extend(chunks)
+
+        # Generate or assign summary
+        try:
+            summary = summarize_document(SAMPLE_DOCUMENT["filename"], chunks)
+            ws.setdefault("summaries", {})[doc_id] = summary
+        except Exception:
+            pass
+
+        doc_meta = {
+            "id": doc_id,
+            "workspaceId": x_workspace_id,
+            "filename": SAMPLE_DOCUMENT["filename"],
+            "fileSize": 42000,
+            "totalPages": SAMPLE_DOCUMENT["totalPages"],
+            "totalChunks": len(chunks),
+            "uploadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "status": "ready"
+        }
+        ws["documents"].append(doc_meta)
+        refresh_workspace_bm25(ws)
+        save_workspaces_to_disk()
+
+        return {
+            "success": True,
+            "documents": ws["documents"],
+            "totalChunks": len(ws["chunks"])
+        }
+    except Exception as e:
+        print(f"Error loading sample doc: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to load sample document: {str(e)}")
+
 @app.post("/api/upload")
 async def upload_pdfs(
     files: List[UploadFile] = File(...),
@@ -186,6 +262,7 @@ async def upload_pdfs(
 
     for file in files:
         doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+        content = b""
         try:
             content = await file.read()
             if len(content) > MAX_FILE_SIZE:
@@ -205,6 +282,10 @@ async def upload_pdfs(
                     chunk["embedding"] = emb_vec
                     chunk["embedding_kind"] = emb_kind
 
+            if mongodb_enabled():
+                # Embed once above, then persist exactly those vectors.
+                save_chunks_to_mongodb(chunks, generate_embeddings=False)
+
             ws["chunks"].extend(chunks)
 
             # Generate abstractive document summary
@@ -218,6 +299,7 @@ async def upload_pdfs(
 
             doc_meta = {
                 "id": doc_id,
+                "workspaceId": x_workspace_id,
                 "filename": file.filename,
                 "fileSize": len(content),
                 "totalPages": total_pages,
@@ -229,36 +311,49 @@ async def upload_pdfs(
             processed.append(doc_meta)
 
         except PDFExtractionError as pe:
+            err_msg = str(pe)
             doc_meta = {
                 "id": doc_id,
+                "workspaceId": x_workspace_id,
                 "filename": file.filename,
-                "fileSize": 0,
+                "fileSize": len(content),
                 "totalPages": 0,
                 "totalChunks": 0,
                 "uploadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "status": "error",
-                "error": str(pe)
+                "errorMessage": err_msg,
+                "error": err_msg
             }
+            ws["documents"].append(doc_meta)
             processed.append(doc_meta)
         except Exception as e:
+            err_msg = f"Upload error: {str(e)}"
             doc_meta = {
                 "id": doc_id,
+                "workspaceId": x_workspace_id,
                 "filename": file.filename,
-                "fileSize": 0,
+                "fileSize": len(content),
                 "totalPages": 0,
                 "totalChunks": 0,
                 "uploadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "status": "error",
-                "error": f"Upload error: {str(e)}"
+                "errorMessage": err_msg,
+                "error": err_msg
             }
+            ws["documents"].append(doc_meta)
             processed.append(doc_meta)
 
     # Rebuild workspace BM25 index with updated chunks & persist to disk
     refresh_workspace_bm25(ws)
     save_workspaces_to_disk()
 
+    # Determine overall status
+    has_errors = any(d.get("status") == "error" for d in processed)
+    error_detail = next((d.get("errorMessage") for d in processed if d.get("status") == "error"), None)
+
     return {
-        "success": True,
+        "success": not has_errors,
+        "error": error_detail,
         "processed": processed,
         "documents": ws["documents"],
         "totalChunks": len(ws["chunks"])
@@ -267,14 +362,30 @@ async def upload_pdfs(
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: str, x_workspace_id: Optional[str] = Header("default")):
     ws = get_or_create_workspace(x_workspace_id)
+    if mongodb_enabled():
+        delete_document_chunks_from_mongodb(x_workspace_id, doc_id)
+    initial_count = len(ws["documents"])
     ws["documents"] = [d for d in ws["documents"] if d["id"] != doc_id]
     ws["chunks"] = [c for c in ws["chunks"] if c["doc_id"] != doc_id]
     if "summaries" in ws and doc_id in ws["summaries"]:
         del ws["summaries"][doc_id]
     refresh_workspace_bm25(ws)
+
+    # If the document belonged to a different workspace session ID, purge it globally as well
+    for other_ws_id, other_ws in workspaces.items():
+        if other_ws_id != ws["id"]:
+            had_doc = any(d["id"] == doc_id for d in other_ws.get("documents", []))
+            if had_doc:
+                other_ws["documents"] = [d for d in other_ws["documents"] if d["id"] != doc_id]
+                other_ws["chunks"] = [c for c in other_ws["chunks"] if c["doc_id"] != doc_id]
+                if "summaries" in other_ws and doc_id in other_ws["summaries"]:
+                    del other_ws["summaries"][doc_id]
+                refresh_workspace_bm25(other_ws)
+
     save_workspaces_to_disk()
     return {
         "success": True,
+        "deletedId": doc_id,
         "documents": ws["documents"],
         "totalChunks": len(ws["chunks"])
     }
@@ -335,19 +446,22 @@ async def chat_rag(req: ChatRequest, x_workspace_id: Optional[str] = Header("def
                 }
                 for d in ws["documents"]
             ]
-        # Strategy 3: Hybrid Retrieval (BM25 + Gemini Embeddings + RRF + MMR)
+        # Strategy 3: Hybrid Retrieval (BM25 + Gemini Embeddings + RRF + MMR + Neighbor Expansion)
         else:
             bm25 = ws.get("bm25_index")
             if bm25 is None:
                 refresh_workspace_bm25(ws)
                 bm25 = ws.get("bm25_index")
 
+            target_doc_id = detect_targeted_document(query, ws.get("documents", []))
+
             retrieved_chunks = hybrid_retrieve(
                 query=query,
                 chunks=all_chunks,
                 bm25_index=bm25,
-                top_k=6,
-                use_query_expansion=True
+                top_k=14,
+                use_query_expansion=True,
+                target_doc_id=target_doc_id
             )
 
             sources = [
@@ -393,7 +507,7 @@ async def chat_rag(req: ChatRequest, x_workspace_id: Optional[str] = Header("def
             # Fallback model with full system instruction preserved
             try:
                 response = client.models.generate_content(
-                    model="gemini-flash-latest",
+                    model="gemini-3-flash-preview",
                     contents=user_content,
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
@@ -468,8 +582,8 @@ async def text_to_speech(req: TTSRequest):
     for chunk in text_chunks:
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[{"parts": [{"text": chunk}]}],
+                model="gemini-2.5-flash-preview-tts",
+                contents=f"Read the following text aloud: {chunk}",
                 config=types.GenerateContentConfig(
                     response_modalities=["AUDIO"],
                     speech_config=types.SpeechConfig(
@@ -515,56 +629,108 @@ async def websocket_live_voice(websocket: WebSocket, workspaceId: str = "default
     )
 
     client = get_gemini_client()
-    try:
-        async with client.aio.live.connect(
-            model="gemini-2.5-flash",
-            config=types.LiveConnectConfig(
-                response_modalities=[types.Modality.AUDIO],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
-                    )
-                ),
-                system_instruction=system_instruction
-            )
-        ) as session:
-            await websocket.send_json({"type": "status", "message": "Gemini Live connected"})
+    live_models = [
+        "gemini-2.5-flash-native-audio-latest",
+        "gemini-2.5-flash-native-audio-preview-12-2025",
+        "gemini-3.1-flash-live-preview",
+    ]
 
-            async def send_to_gemini():
-                while True:
-                    data = await websocket.receive_json()
-                    if data.get("type") == "audio" and data.get("audio"):
-                        audio_data = data["audio"]
-                        if isinstance(audio_data, str):
-                            audio_bytes = base64.b64decode(audio_data)
-                        else:
-                            audio_bytes = audio_data
-                        await session.send_realtime_input(
-                            audio=types.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
+    session = None
+    live_connect_cm = None
+    for l_model in live_models:
+        try:
+            live_connect_cm = client.aio.live.connect(
+                model=l_model,
+                config=types.LiveConnectConfig(
+                    response_modalities=[types.Modality.AUDIO],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
                         )
+                    ),
+                    system_instruction=system_instruction
+                )
+            )
+            session = await live_connect_cm.__aenter__()
+            break
+        except Exception as conn_err:
+            print(f"Warning: Live connect failed for {l_model}: {conn_err}")
+            continue
 
-            async def receive_from_gemini():
-                async for response in session.receive():
-                    server_content = response.server_content
-                    if server_content is not None:
-                        model_turn = server_content.model_turn
-                        if model_turn is not None:
-                            for part in model_turn.parts:
-                                if part.inline_data:
-                                    part_data = part.inline_data.data
-                                    if isinstance(part_data, bytes):
-                                        audio_b64 = base64.b64encode(part_data).decode("utf-8")
-                                    else:
-                                        audio_b64 = part_data
-                                    await websocket.send_json({"type": "audio", "audio": audio_b64})
-                                if part.text:
-                                    await websocket.send_json({"type": "text", "text": part.text})
+    if not session:
+        await websocket.send_json({"type": "error", "message": "Failed to connect to Gemini Live Voice service."})
+        await websocket.close()
+        return
 
-            await asyncio.gather(send_to_gemini(), receive_from_gemini())
+    try:
+        await websocket.send_json({"type": "status", "message": "Gemini Live connected"})
+
+        async def send_to_gemini():
+            while True:
+                data = await websocket.receive_json()
+                msg_type = data.get("type")
+                if msg_type == "audio" and data.get("audio"):
+                    audio_data = data["audio"]
+                    if isinstance(audio_data, str):
+                        audio_bytes = base64.b64decode(audio_data)
+                    else:
+                        audio_bytes = audio_data
+                    await session.send_realtime_input(
+                        audio=types.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
+                    )
+                elif msg_type == "text" and data.get("text"):
+                    try:
+                        await session.send_client_content(
+                            turns=[types.Content(parts=[types.Part.from_text(text=data["text"])])],
+                            turn_complete=True
+                        )
+                    except Exception as te:
+                        print(f"Text input error: {te}")
+                elif msg_type == "interrupt":
+                    try:
+                        await session.send_client_content(
+                            turns=[types.Content(parts=[types.Part.from_text(text="[User interrupted]")] )],
+                            turn_complete=True
+                        )
+                    except Exception as ie:
+                        print(f"Interrupt dispatch error: {ie}")
+
+        async def receive_from_gemini():
+            async for response in session.receive():
+                server_content = response.server_content
+                if server_content is not None:
+                    if getattr(server_content, "interrupted", False):
+                        await websocket.send_json({"type": "interrupted"})
+
+                    model_turn = server_content.model_turn
+                    if model_turn is not None:
+                        for part in model_turn.parts:
+                            if part.inline_data:
+                                part_data = part.inline_data.data
+                                if isinstance(part_data, bytes):
+                                    audio_b64 = base64.b64encode(part_data).decode("utf-8")
+                                else:
+                                    audio_b64 = part_data
+                                await websocket.send_json({"type": "audio", "audio": audio_b64})
+                            if part.text:
+                                clean_text = re.sub(r"\*\*.*?\*\*", "", part.text).strip()
+                                if clean_text:
+                                    await websocket.send_json({"type": "outputTranscript", "text": clean_text})
+
+                    if getattr(server_content, "turn_complete", False):
+                        await websocket.send_json({"type": "turnComplete"})
+
+        await asyncio.gather(send_to_gemini(), receive_from_gemini())
     except WebSocketDisconnect:
         pass
     except Exception as e:
         await websocket.send_json({"type": "error", "message": str(e)})
+    finally:
+        if live_connect_cm:
+            try:
+                await live_connect_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
 
 # Static files for built React SPA frontend (for Render / Docker single-container deployment)
 from fastapi.staticfiles import StaticFiles
@@ -584,4 +750,3 @@ if os.path.exists(dist_dir):
         if os.path.exists(file_path) and os.path.isfile(file_path):
             return FileResponse(file_path)
         return FileResponse(os.path.join(dist_dir, "index.html"))
-

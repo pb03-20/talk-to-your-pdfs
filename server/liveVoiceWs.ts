@@ -55,7 +55,7 @@ RULES:
         callbacks: {
           onmessage: (message: LiveServerMessage) => {
             try {
-              // Check for model output audio
+              // Check for model output audio / text
               const parts = message.serverContent?.modelTurn?.parts;
               if (parts && parts.length > 0) {
                 for (const part of parts) {
@@ -74,7 +74,21 @@ RULES:
                 }
               }
 
-              // Check for interruption
+              // Forward user speech transcript (Gemini transcribes the user's audio)
+              const inputTranscript = (message as any).serverContent?.inputTranscript;
+              if (inputTranscript?.text) {
+                clientWs.send(JSON.stringify({
+                  type: "inputTranscript",
+                  text: inputTranscript.text,
+                }));
+              }
+
+              // Turn complete — tell client mic can resume
+              if (message.serverContent?.turnComplete) {
+                clientWs.send(JSON.stringify({ type: "turnComplete" }));
+              }
+
+              // Check for interruption (user spoke while AI was talking)
               if (message.serverContent?.interrupted) {
                 clientWs.send(JSON.stringify({ type: "interrupted" }));
               }
@@ -114,6 +128,11 @@ RULES:
             liveSession.sendRealtimeInput({
               text: data.text,
             });
+          } else if (data.type === "interrupt") {
+            // User interrupted — send an empty end-of-turn to stop the AI mid-response
+            try {
+              liveSession.sendRealtimeInput({ audio: { data: "", mimeType: "audio/pcm;rate=16000" } });
+            } catch (_) {}
           }
         } catch (e) {
           console.error("Error sending input to Live API session:", e);
