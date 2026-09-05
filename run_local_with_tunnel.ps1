@@ -10,8 +10,28 @@ if (-not $env:GEMINI_API_KEY) {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptDir
 
+# Find valid Python executable with uvicorn installed
+$pythonCmd = "python"
+$candidates = @(
+    "C:\Users\PB\AppData\Local\Programs\Python\Python311\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+    "python"
+)
+
+foreach ($cand in $candidates) {
+    if (Test-Path $cand) {
+        $testRes = & $cand -c "import uvicorn; print('ok')" 2>$null
+        if ($testRes -eq "ok") {
+            $pythonCmd = $cand
+            break
+        }
+    }
+}
+
+Write-Host "Using Python: $pythonCmd" -ForegroundColor Gray
 Write-Host "[1/2] Launching Python FastAPI Server on http://localhost:8000 ..." -ForegroundColor Green
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$scriptDir\backend'; python -m uvicorn main:app --host 0.0.0.0 --port 8000"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$scriptDir\backend'; & '$pythonCmd' -m uvicorn main:app --host 0.0.0.0 --port 8000"
 
 Start-Sleep -Seconds 3
 
