@@ -17,7 +17,7 @@ IF "%GEMINI_API_KEY%"=="" (
     echo Please set your key in .env or environment: set GEMINI_API_KEY=your_key_here
     echo.
 ) ELSE (
-    echo [INFO] GEMINI_API_KEY loaded automatically.
+    echo [INFO] GEMINI_API_KEY loaded automatically from .env
 )
 
 SET PY_CMD=C:\Users\PB\AppData\Local\Programs\Python\Python311\python.exe
@@ -31,4 +31,4 @@ start "FastAPI Server" cmd /k "set GEMINI_API_KEY=%GEMINI_API_KEY% && cd backend
 timeout /t 3 >nul
 
 echo [2/2] Launching Cloudflare Public Tunnel ...
-npx cloudflared tunnel --url http://localhost:8000
+npx -y cloudflared tunnel --url http://localhost:8000

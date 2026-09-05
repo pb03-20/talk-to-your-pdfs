@@ -13,7 +13,6 @@ if (Test-Path $envFile) {
             $k = $matches[1].Trim()
             $v = $matches[2].Trim().Trim('"').Trim("'")
             [Environment]::SetEnvironmentVariable($k, $v, "Process")
-            Set-Item -Path "env:$k" -Value $v
         }
     }
 }
@@ -46,10 +45,13 @@ foreach ($cand in $candidates) {
 
 Write-Host "Using Python: $pythonCmd" -ForegroundColor Gray
 Write-Host "[1/2] Launching Python FastAPI Server on http://localhost:8000 ..." -ForegroundColor Green
-$apiKey = $env:GEMINI_API_KEY
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "`$env:GEMINI_API_KEY='$apiKey'; cd '$scriptDir\backend'; & '$pythonCmd' -m uvicorn main:app --host 0.0.0.0 --port 8000"
+
+$backendPath = Join-Path $scriptDir "backend"
+$cmdBlock = "[Environment]::SetEnvironmentVariable('GEMINI_API_KEY', '$env:GEMINI_API_KEY', 'Process'); Set-Location '$backendPath'; & '$pythonCmd' -m uvicorn main:app --host 0.0.0.0 --port 8000"
+
+Start-Process powershell -ArgumentList "-NoExit", "-Command", $cmdBlock
 
 Start-Sleep -Seconds 3
 
 Write-Host "[2/2] Launching Cloudflare Tunnel for public HTTPS link ..." -ForegroundColor Green
-npx cloudflared tunnel --url http://localhost:8000
+npx -y cloudflared tunnel --url http://localhost:8000
