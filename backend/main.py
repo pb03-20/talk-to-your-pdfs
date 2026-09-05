@@ -158,6 +158,7 @@ class TTSRequest(BaseModel):
 
 @app.get("/health")
 @app.get("/api/health")
+@app.head("/health")
 def health_check():
     return {"status": "ok", "service": "Talk to Your PDFs FastAPI"}
 
