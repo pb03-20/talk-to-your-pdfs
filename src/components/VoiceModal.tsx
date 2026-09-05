@@ -55,8 +55,9 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const isMutedRef = useRef(false);
   const recognitionRef = useRef<any>(null);
-
-      const isAiSpeakingRef = useRef(false);
+  const isAiSpeakingRef = useRef(false);
+  const bargeInFramesRef = useRef(0);
+  const lastInterruptRef = useRef(0);
   useEffect(() => {
     isAiSpeakingRef.current = isAiSpeaking;
   }, [isAiSpeaking]);
@@ -120,6 +121,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
     setIsConnecting(false);
     setIsAiSpeaking(false);
     isAiSpeakingRef.current = false;
+    bargeInFramesRef.current = 0;
   };
 
   const startLiveSession = async () => {
@@ -200,7 +202,9 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
           const rec = new SpeechRec();
           rec.continuous = true;
           rec.interimResults = true;
-          rec.lang = "en-US";
+          // Use the browser's preferred language for the optional transcript.
+          // Gemini itself receives the raw audio and detects the spoken language.
+          rec.lang = navigator.language || "en-US";
           rec.onresult = (evt: any) => {
             let fullText = "";
             for (let i = evt.resultIndex; i < evt.results.length; i++) {
@@ -240,7 +244,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const wsUrl = `${protocol}//${window.location.host}/api/live-voice?workspaceId=${encodeURIComponent(
         workspaceId
-      )}`;
+      )}&language=${encodeURIComponent(navigator.language || "")}`;
 
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -255,10 +259,10 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
 
         // Hook up audio processor once connected
         processor.onaudioprocess = (e) => {
-          // Do not send mic audio if muted or while AI is speaking (prevents speaker echo from interrupting the AI)
+          // Continue listening while Gemini speaks. If the user starts talking,
+          // detect sustained voice activity and immediately let them barge in.
           if (
             isMutedRef.current ||
-            isAiSpeakingRef.current ||
             !wsRef.current ||
             wsRef.current.readyState !== WebSocket.OPEN
           ) {
@@ -272,6 +276,31 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
           const inputData = e.inputBuffer.getChannelData(0);
           const pcmBuffer = floatTo16BitPCM(inputData);
           const base64Audio = arrayBufferToBase64(pcmBuffer);
+
+          if (isAiSpeakingRef.current) {
+            let energy = 0;
+            for (let i = 0; i < inputData.length; i++) energy += inputData[i] * inputData[i];
+            const rms = Math.sqrt(energy / inputData.length);
+            bargeInFramesRef.current = rms > 0.018 ? bargeInFramesRef.current + 1 : 0;
+
+            // Three consecutive audio frames (~750ms) helps distinguish real
+            // speech from residual speaker audio despite echo cancellation.
+            if (
+              bargeInFramesRef.current >= 3 &&
+              Date.now() - lastInterruptRef.current > 1000
+            ) {
+              lastInterruptRef.current = Date.now();
+              playerRef.current?.stop();
+              setIsAiSpeaking(false);
+              isAiSpeakingRef.current = false;
+              wsRef.current.send(JSON.stringify({ type: "interrupt" }));
+              setStatusMessage("Listening to you...");
+            } else {
+              // Keep Gemini from receiving its own speaker output before a
+              // genuine user interruption is detected.
+              return;
+            }
+          }
 
           wsRef.current.send(
             JSON.stringify({
@@ -317,6 +346,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
             playerRef.current?.stop();
             setIsAiSpeaking(false);
             isAiSpeakingRef.current = false;
+            bargeInFramesRef.current = 0;
             if (inputAudioCtxRef.current && inputAudioCtxRef.current.state === "suspended") {
               inputAudioCtxRef.current.resume().catch(() => {});
             }
@@ -378,6 +408,8 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
       playerRef.current.stop();
     }
     setIsAiSpeaking(false);
+    isAiSpeakingRef.current = false;
+    bargeInFramesRef.current = 0;
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "interrupt" }));
     }
@@ -494,11 +526,11 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
               }`}
             >
               {isAiSpeaking
-                ? "AI Spoken Response"
+                ? "AI Speaking — you can interrupt"
                 : isMuted
                 ? "Microphone Muted"
                 : isConnected
-                ? "Listening (16kHz Stream)"
+                ? "Two-way listening"
                 : "Connecting..."}
             </span>
             <p className="text-xs text-zinc-500 mt-1 max-w-sm">{statusMessage}</p>

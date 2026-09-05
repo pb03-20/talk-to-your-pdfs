@@ -616,7 +616,11 @@ async def text_to_speech(req: TTSRequest):
     }
 
 @app.websocket("/api/live-voice")
-async def websocket_live_voice(websocket: WebSocket, workspaceId: str = "default"):
+async def websocket_live_voice(
+    websocket: WebSocket,
+    workspaceId: str = "default",
+    language: str = "",
+):
     await websocket.accept()
     ws = get_or_create_workspace(workspaceId)
     docs = ws["documents"]
@@ -626,7 +630,11 @@ async def websocket_live_voice(websocket: WebSocket, workspaceId: str = "default
         f"You are the voice assistant for 'Talk to Your PDFs'.\n"
         f"Documents in workspace:\n{doc_summary or 'No documents'}\n"
         f"Answer the user's questions clearly, concisely, and factually based on their PDFs. "
-        f"Cite page numbers when stating facts. If not in the PDFs, say you could not find it."
+        f"Cite page numbers when stating facts. If not in the PDFs, say you could not find it.\n"
+        "LANGUAGE: Detect the language the user speaks and reply in that same language. "
+        "Keep using the user's current spoken language unless they explicitly ask to switch. "
+        f"Their browser language preference is '{language or 'unknown'}'; this is only a hint, "
+        "not a reason to override the language heard in their audio."
     )
 
     client = get_gemini_client()
@@ -688,13 +696,10 @@ async def websocket_live_voice(websocket: WebSocket, workspaceId: str = "default
                     except Exception as te:
                         print(f"Text input error: {te}")
                 elif msg_type == "interrupt":
-                    try:
-                        await session.send_client_content(
-                            turns=[types.Content(parts=[types.Part.from_text(text="[User interrupted]")] )],
-                            turn_complete=True
-                        )
-                    except Exception as ie:
-                        print(f"Interrupt dispatch error: {ie}")
+                    # Stop only browser playback here. The next microphone
+                    # frames are sent as real-time input, allowing Gemini Live
+                    # to detect and handle the user's barge-in naturally.
+                    await websocket.send_json({"type": "interrupted"})
 
         async def receive_from_gemini():
             async for response in session.receive():
