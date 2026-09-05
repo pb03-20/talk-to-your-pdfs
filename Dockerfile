@@ -11,7 +11,6 @@ WORKDIR /app
 # Copy package files and install frontend dependencies
 COPY package*.json tsconfig*.json vite.config.ts index.html ./
 COPY src/ ./src/
-COPY public/ ./public/
 RUN npm ci
 RUN npm run build:client
 
