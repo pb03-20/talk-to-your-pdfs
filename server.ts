@@ -308,49 +308,92 @@ async function startServer() {
     }
   });
 
-  // Text-to-Speech endpoint (Gemini TTS)
+  // Text-to-Speech endpoint (Gemini TTS with smart sentence chunking)
   app.post("/api/tts", async (req, res) => {
     const { text, voice = "Kore" } = req.body;
-    if (!text || typeof text !== "string") {
+    if (!text || typeof text !== "string" || !text.trim()) {
       return res.status(400).json({ error: "Text is required" });
     }
 
     try {
       const ai = getGeminiClient();
-      const cleanText = text.replace(/\[.*?\]/g, "").slice(0, 1000); // Strip citation tags for cleaner audio
+      let cleanText = text.replace(/\[.*?\]/g, "").replace(/\s+/g, " ").trim();
+      const MAX_TTS_TOTAL = 4000;
+      const isTruncated = cleanText.length > MAX_TTS_TOTAL;
+      if (isTruncated) {
+        cleanText = cleanText.slice(0, MAX_TTS_TOTAL);
+      }
 
-      let audioBase64: string | undefined;
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          const response = await ai.models.generateContent({
-            model: "gemini-3.1-flash-tts-preview",
-            contents: [{ parts: [{ text: cleanText }] }],
-            config: {
-              responseModalities: [Modality.AUDIO],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName: voice },
+      // Sentence-based chunking into ≤ 800 char segments
+      const sentences = cleanText.split(/(?<=[.!?])\s+/);
+      const textChunks: string[] = [];
+      let curr = "";
+      for (const s of sentences) {
+        if (curr.length + s.length + 1 <= 800) {
+          curr = (curr + " " + s).trim();
+        } else {
+          if (curr) textChunks.push(curr);
+          if (s.length > 800) {
+            for (let i = 0; i < s.length; i += 800) {
+              textChunks.push(s.slice(i, i + 800));
+            }
+            curr = "";
+          } else {
+            curr = s;
+          }
+        }
+      }
+      if (curr) textChunks.push(curr);
+
+      if (textChunks.length === 0) {
+        return res.status(400).json({ error: "No speakable text found" });
+      }
+
+      const audioBuffers: Buffer[] = [];
+      for (const chunk of textChunks) {
+        let chunkAudio: string | undefined;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            const response = await ai.models.generateContent({
+              model: "gemini-2.5-flash",
+              contents: [{ parts: [{ text: chunk }] }],
+              config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName: voice },
+                  },
                 },
               },
-            },
-          });
-          audioBase64 = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-          if (audioBase64) break;
-        } catch (genErr: any) {
-          const is503 = genErr?.message?.includes("503") || genErr?.message?.includes("UNAVAILABLE");
-          if (is503 && attempt === 1) {
-            await new Promise((r) => setTimeout(r, 600));
-            continue;
+            });
+            chunkAudio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            if (chunkAudio) break;
+          } catch (genErr: any) {
+            const is503 = genErr?.message?.includes("503") || genErr?.message?.includes("UNAVAILABLE");
+            if (is503 && attempt === 1) {
+              await new Promise((r) => setTimeout(r, 600));
+              continue;
+            }
+            break;
           }
-          throw genErr;
+        }
+        if (chunkAudio) {
+          audioBuffers.push(Buffer.from(chunkAudio, "base64"));
+        } else if (audioBuffers.length === 0) {
+          return res.status(500).json({ error: "Failed to generate TTS audio" });
+        } else {
+          break;
         }
       }
 
-      if (audioBase64) {
-        res.json({ audio: audioBase64, sampleRate: 24000 });
-      } else {
-        res.status(500).json({ error: "No audio generated from TTS" });
-      }
+      const combinedBuffer = Buffer.concat(audioBuffers);
+      res.json({
+        audio: combinedBuffer.toString("base64"),
+        sampleRate: 24000,
+        totalCharacters: cleanText.length,
+        chunksProcessed: audioBuffers.length,
+        isTruncated,
+      });
     } catch (err: any) {
       console.warn("TTS generation warning:", err?.message || err);
       res.status(500).json({ error: err?.message || "TTS generation failed" });

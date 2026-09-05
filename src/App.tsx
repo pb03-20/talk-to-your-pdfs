@@ -8,7 +8,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatArea } from "./components/ChatArea";
 import { VoiceModal } from "./components/VoiceModal";
 import { CitationModal } from "./components/CitationModal";
-import { DocumentMetadata, ChatMessage, SourceCitation } from "./types";
+import { DocumentMetadata, DocumentChunk, ChatMessage, SourceCitation } from "./types";
 import { LiveAudioPlayer, speakWithBrowser } from "./lib/audioUtils";
 
 function getOrInitWorkspaceId(): string {
@@ -24,6 +24,7 @@ function getOrInitWorkspaceId(): string {
 export default function App() {
   const [workspaceId, setWorkspaceId] = useState<string>(getOrInitWorkspaceId);
   const [documents, setDocuments] = useState<DocumentMetadata[]>([]);
+  const [workspaceChunks, setWorkspaceChunks] = useState<DocumentChunk[]>([]);
   const [totalChunks, setTotalChunks] = useState<number>(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isUploading, setIsUploading] = useState<boolean>(false);
@@ -48,6 +49,7 @@ export default function App() {
         const data = await res.json();
         setDocuments(data.documents || []);
         setTotalChunks(data.totalChunks || 0);
+        if (data.chunks) setWorkspaceChunks(data.chunks);
         setMessages(data.messages || []);
       }
     } catch (err) {
@@ -66,13 +68,12 @@ export default function App() {
 
     const fileList = Array.from(files);
 
-    // Client-side file size check (100MB limit)
-    const MAX_FILE_SIZE = 100 * 1024 * 1024;
-    const oversized = fileList.find((f) => f.size > MAX_FILE_SIZE);
+    const VERCEL_MAX_FILE_SIZE = 4.5 * 1024 * 1024; // 4.5MB Vercel Serverless body limit
+    const oversized = fileList.find((f) => f.size > VERCEL_MAX_FILE_SIZE);
     if (oversized) {
       const sizeMB = (oversized.size / (1024 * 1024)).toFixed(1);
       setUploadError(
-        `"${oversized.name}" is ${sizeMB}MB. Maximum supported PDF size is 100MB per file.`
+        `"${oversized.name}" is ${sizeMB}MB. Vercel Serverless Functions limit upload payload size to 4.5MB per file.`
       );
       return;
     }
@@ -93,6 +94,9 @@ export default function App() {
       });
 
       if (!res.ok) {
+        if (res.status === 413) {
+          throw new Error("File payload exceeds Vercel Serverless Function limit of 4.5MB. Please upload a smaller PDF.");
+        }
         const errJson = await res.json().catch(() => ({}));
         throw new Error(errJson.error || `Upload failed with status: ${res.status}`);
       }
@@ -125,6 +129,11 @@ export default function App() {
         throw new Error("Failed to load sample document");
       }
 
+      const data = await res.json();
+      if (data.documents) setDocuments(data.documents);
+      if (data.chunks) setWorkspaceChunks(data.chunks);
+      if (data.totalChunks) setTotalChunks(data.totalChunks);
+
       await loadWorkspace(workspaceId);
     } catch (err: any) {
       console.error("Sample document loading error:", err);
@@ -147,6 +156,7 @@ export default function App() {
         const data = await res.json();
         setDocuments(data.documents || []);
         setTotalChunks(data.totalChunks || 0);
+        setWorkspaceChunks((prev) => prev.filter((c) => c.docId !== docId));
       }
     } catch (err) {
       console.error("Failed to delete document:", err);
@@ -159,11 +169,11 @@ export default function App() {
       return;
     }
 
-    // Generate fresh isolated workspace ID
     const newId = `ws_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     localStorage.setItem("pdf_rag_workspace_id", newId);
     setWorkspaceId(newId);
     setDocuments([]);
+    setWorkspaceChunks([]);
     setTotalChunks(0);
     setMessages([
       {

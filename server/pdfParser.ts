@@ -1,6 +1,6 @@
 import { DocumentChunk } from "./types.js";
 // @ts-ignore
-import { PDFParse } from "pdf-parse";
+import pdfParse from "pdf-parse/lib/pdf-parse.js";
 
 export interface ExtractedPage {
   pageNumber: number;
@@ -14,36 +14,51 @@ export interface ParseResult {
 }
 
 /**
- * Extracts text page-by-page from a PDF buffer.
+ * Extracts text page-by-page from a PDF buffer using pdf-parse v1.
  */
 export async function extractPdfText(buffer: Buffer): Promise<ParseResult> {
   try {
-    const parser = new PDFParse({ data: buffer });
-    const textData = await parser.getText();
-    await parser.destroy();
-
     const pages: ExtractedPage[] = [];
-    if (textData && Array.isArray(textData.pages) && textData.pages.length > 0) {
-      for (const p of textData.pages) {
-        const cleanText = (p.text || "").trim();
+    let pageNumCounter = 0;
+
+    // Custom pagerender to capture text per page
+    const options = {
+      pagerender: async function (pageData: any) {
+        pageNumCounter++;
+        const textContent = await pageData.getTextContent();
+        let lastY: number | null = null;
+        let text = "";
+        for (const item of textContent.items) {
+          if (lastY === item.transform[5] || lastY === null) {
+            text += item.str;
+          } else {
+            text += "\n" + item.str;
+          }
+          lastY = item.transform[5];
+        }
+        const cleanText = text.trim();
         if (cleanText) {
           pages.push({
-            pageNumber: p.num || pages.length + 1,
+            pageNumber: pageNumCounter,
             text: cleanText,
           });
         }
-      }
-    }
+        return text;
+      },
+    };
 
-    // Fallback if pages array is empty but raw text exists
-    if (pages.length === 0 && textData?.text) {
+    const data = await pdfParse(buffer, options);
+
+    // Fallback if custom page render didn't populate pages
+    if (pages.length === 0 && data.text) {
+      const rawLines = data.text.split("\n");
       pages.push({
         pageNumber: 1,
-        text: textData.text.trim(),
+        text: rawLines.join("\n").trim(),
       });
     }
 
-    const totalPages = pages.length > 0 ? pages.length : textData?.total || 1;
+    const totalPages = data.numpages || pages.length || 1;
     const rawText = pages.map((p) => `--- Page ${p.pageNumber} ---\n${p.text}`).join("\n\n");
 
     return {
@@ -52,7 +67,7 @@ export async function extractPdfText(buffer: Buffer): Promise<ParseResult> {
       rawText,
     };
   } catch (err: any) {
-    console.error("Error parsing PDF with PDFParse:", err);
+    console.error("Error parsing PDF with pdf-parse:", err);
     throw new Error(`Failed to extract text from PDF: ${err?.message || "Unknown error"}`);
   }
 }
@@ -75,12 +90,10 @@ export function chunkDocumentPages(
     const text = page.text.replace(/\r\n/g, "\n");
     if (!text || text.trim().length === 0) continue;
 
-    // Split page by paragraphs or sentences
     let startIdx = 0;
     while (startIdx < text.length) {
       let endIdx = Math.min(startIdx + chunkSize, text.length);
 
-      // Try to break on a sentence boundary or newline if not at end
       if (endIdx < text.length) {
         const nextPeriod = text.indexOf(". ", endIdx - 80);
         const nextNewline = text.indexOf("\n\n", endIdx - 80);

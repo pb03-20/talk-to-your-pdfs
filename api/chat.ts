@@ -8,10 +8,42 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const wsId = getWorkspaceId(req);
-  const { message } = req.body || {};
+  let body = req.body;
+  if (typeof body === "string") {
+    try { body = JSON.parse(body); } catch (e) {}
+  }
+  const { message } = body || {};
 
   if (!message || typeof message !== "string" || !message.trim()) {
     return res.status(400).json({ error: "Message is required" });
+  }
+
+  if (Array.isArray(body?.chunks) && body.chunks.length > 0) {
+    const existingChunks = workspaceStore.getChunks(wsId);
+    if (existingChunks.length === 0) {
+      workspaceStore.addChunks(wsId, body.chunks);
+    }
+    const existingDocs = workspaceStore.getDocuments(wsId);
+    if (existingDocs.length === 0) {
+      const docMap = new Map<string, any>();
+      for (const c of body.chunks) {
+        if (!docMap.has(c.docId)) {
+          docMap.set(c.docId, {
+            id: c.docId,
+            workspaceId: wsId,
+            filename: c.filename,
+            fileSize: 42000,
+            totalPages: c.pageNumber || 1,
+            totalChunks: 1,
+            uploadedAt: new Date().toISOString(),
+            status: "ready",
+          });
+        }
+      }
+      for (const doc of docMap.values()) {
+        workspaceStore.addDocument(wsId, doc);
+      }
+    }
   }
 
   const userMsgId = `user_${Date.now()}`;
@@ -59,8 +91,12 @@ function getWorkspaceId(req: VercelRequest): string {
   if (typeof queryWsId === "string" && queryWsId.trim()) {
     return queryWsId.trim();
   }
-  if (req.body && typeof req.body.workspaceId === "string" && req.body.workspaceId.trim()) {
-    return req.body.workspaceId.trim();
+  let reqBody = req.body;
+  if (typeof reqBody === "string") {
+    try { reqBody = JSON.parse(reqBody); } catch (e) {}
+  }
+  if (reqBody && typeof reqBody.workspaceId === "string" && reqBody.workspaceId.trim()) {
+    return reqBody.workspaceId.trim();
   }
   return "default_workspace";
 }

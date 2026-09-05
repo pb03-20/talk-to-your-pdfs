@@ -1,12 +1,17 @@
 import { WorkspaceData, DocumentMetadata, DocumentChunk, ChatMessage } from "./types.js";
+import fs from "fs";
+import path from "path";
+import os from "os";
+
+function getTmpPath(workspaceId: string): string {
+  const sanitized = workspaceId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return path.join(os.tmpdir(), `rag_ws_${sanitized}.json`);
+}
 
 class WorkspaceStore {
   private workspaces: Map<string, WorkspaceData> = new Map();
 
   constructor() {
-    // Note: In serverless environments, cleanup happens naturally when
-    // function instances are recycled. setInterval is only useful in
-    // long-running server mode.
     if (typeof globalThis !== "undefined" && !(globalThis as any).__workspaceCleanupSet) {
       try {
         setInterval(() => {
@@ -19,8 +24,39 @@ class WorkspaceStore {
     }
   }
 
+  private persistToDisk(workspaceId: string): void {
+    try {
+      const ws = this.workspaces.get(workspaceId);
+      if (!ws) return;
+      const filePath = getTmpPath(workspaceId);
+      fs.writeFileSync(filePath, JSON.stringify(ws), "utf-8");
+    } catch (err) {
+      console.warn("Failed to persist workspace to /tmp disk:", err);
+    }
+  }
+
+  private loadFromDisk(workspaceId: string): WorkspaceData | null {
+    try {
+      const filePath = getTmpPath(workspaceId);
+      if (fs.existsSync(filePath)) {
+        const dataStr = fs.readFileSync(filePath, "utf-8");
+        const ws = JSON.parse(dataStr) as WorkspaceData;
+        if (ws && ws.id) {
+          this.workspaces.set(workspaceId, ws);
+          return ws;
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to load workspace from /tmp disk:", err);
+    }
+    return null;
+  }
+
   public getOrCreateWorkspace(workspaceId: string): WorkspaceData {
     let ws = this.workspaces.get(workspaceId);
+    if (!ws) {
+      ws = this.loadFromDisk(workspaceId) || undefined;
+    }
     if (!ws) {
       ws = {
         id: workspaceId,
@@ -37,12 +73,17 @@ class WorkspaceStore {
         ],
       };
       this.workspaces.set(workspaceId, ws);
+      this.persistToDisk(workspaceId);
     }
     return ws;
   }
 
   public getWorkspace(workspaceId: string): WorkspaceData | undefined {
-    return this.workspaces.get(workspaceId);
+    let ws = this.workspaces.get(workspaceId);
+    if (!ws) {
+      ws = this.loadFromDisk(workspaceId) || undefined;
+    }
+    return ws;
   }
 
   public getDocuments(workspaceId: string): DocumentMetadata[] {
@@ -52,9 +93,9 @@ class WorkspaceStore {
 
   public addDocument(workspaceId: string, doc: DocumentMetadata): void {
     const ws = this.getOrCreateWorkspace(workspaceId);
-    // Replace if existing
     ws.documents = ws.documents.filter((d) => d.id !== doc.id);
     ws.documents.push(doc);
+    this.persistToDisk(workspaceId);
   }
 
   public updateDocumentStatus(
@@ -72,12 +113,14 @@ class WorkspaceStore {
       if (typeof totalChunks === "number") doc.totalChunks = totalChunks;
       if (typeof totalPages === "number") doc.totalPages = totalPages;
       if (errorMessage) doc.errorMessage = errorMessage;
+      this.persistToDisk(workspaceId);
     }
   }
 
   public addChunks(workspaceId: string, chunks: DocumentChunk[]): void {
     const ws = this.getOrCreateWorkspace(workspaceId);
     ws.chunks.push(...chunks);
+    this.persistToDisk(workspaceId);
   }
 
   public removeDocument(workspaceId: string, docId: string): boolean {
@@ -85,11 +128,18 @@ class WorkspaceStore {
     if (!ws) return false;
     ws.documents = ws.documents.filter((d) => d.id !== docId);
     ws.chunks = ws.chunks.filter((c) => c.docId !== docId);
+    this.persistToDisk(workspaceId);
     return true;
   }
 
   public clearWorkspace(workspaceId: string): void {
     this.workspaces.delete(workspaceId);
+    try {
+      const filePath = getTmpPath(workspaceId);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch {}
   }
 
   public getChunks(workspaceId: string): DocumentChunk[] {
@@ -105,12 +155,14 @@ class WorkspaceStore {
   public addMessage(workspaceId: string, message: ChatMessage): void {
     const ws = this.getOrCreateWorkspace(workspaceId);
     ws.messages.push(message);
+    this.persistToDisk(workspaceId);
   }
 
   public clearMessages(workspaceId: string): void {
     const ws = this.getWorkspace(workspaceId);
     if (ws) {
       ws.messages = [];
+      this.persistToDisk(workspaceId);
     }
   }
 
@@ -120,7 +172,7 @@ class WorkspaceStore {
     for (const [id, ws] of this.workspaces.entries()) {
       const created = new Date(ws.createdAt).getTime();
       if (now - created > maxAgeMs) {
-        this.workspaces.delete(id);
+        this.clearWorkspace(id);
       }
     }
   }

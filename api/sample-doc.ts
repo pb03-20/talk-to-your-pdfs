@@ -41,6 +41,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.json({
       success: true,
       document: ws.documents.find((d) => d.id === docId),
+      documents: ws.documents,
+      chunks: ws.chunks,
       totalChunks: ws.chunks.length,
     });
   } catch (err: any) {

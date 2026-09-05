@@ -163,9 +163,10 @@ export async function askGeminiRag(
   history: ChatMessage[] = []
 ): Promise<{ answer: string; sources: SourceCitation[] }> {
   const allDocs = workspaceStore.getDocuments(workspaceId);
+  const allChunks = workspaceStore.getChunks(workspaceId);
   const relevantResults = await searchRelevantChunks(workspaceId, userPrompt, 6);
 
-  if (allDocs.length === 0) {
+  if (allDocs.length === 0 && allChunks.length === 0) {
     return {
       answer: "No documents have been uploaded yet. Please upload one or more PDFs in the sidebar to start asking questions!",
       sources: [],
@@ -219,7 +220,7 @@ User's Question: "${userPrompt}"
 Please answer the question thoroughly and accurately based on the context above. Always mention the relevant document name(s) and page number(s). If the context doesn't contain the answer, state that clearly.`;
 
   const ai = getGeminiClient();
-  const candidateModels = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
+  const candidateModels = ["gemini-2.5-flash", "gemini-flash-latest"];
 
   let answerText = "";
   for (const modelName of candidateModels) {

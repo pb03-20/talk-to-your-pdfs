@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { workspaceStore } from "../server/workspaceStore.js";
+import { workspaceStore } from "../../server/workspaceStore.js";
 
 export default function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "GET") {
@@ -12,6 +12,7 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
   res.json({
     workspaceId: ws.id,
     documents: ws.documents,
+    chunks: ws.chunks,
     totalChunks: ws.chunks.length,
     messages: ws.messages,
   });

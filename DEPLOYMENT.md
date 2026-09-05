@@ -1,6 +1,6 @@
 # Talk to Your PDFs - Architecture & Deployment Guide
 
-An interactive web application enabling users to upload multiple PDFs, extract and index their contents using RAG, ask questions with grounded citations, and hold live spoken voice conversations using Google Gemini.
+An interactive web application enabling users to upload multiple large PDFs (including 50+ MBBS textbooks), extract and index their contents using PyMuPDF and Gemini RAG, ask questions with grounded citations, and hold live spoken voice conversations using Google Gemini.
 
 ---
 
@@ -9,96 +9,75 @@ An interactive web application enabling users to upload multiple PDFs, extract a
 ```
                                     ┌────────────────────────┐
                                     │    Google Gemini API   │
-                                    │  - gemini-3.8-flash    │
-                                    │  - gemini-embedding-2  │
-                                    │  - gemini-3.1-live     │
-                                    │  - gemini-3.1-tts      │
+                                    │  - gemini-2.5-flash    │
+                                    │  - text-embedding-004  │
+                                    │  - gemini-2.5-pro      │
                                     └───────────▲────────────┘
                                                 │
-[User Browser] ──(HTTP/SSE/WS)──► [Web Server / Backend Service]
-  • React 19 + Tailwind             • Ephemeral Workspace Isolation
-  • Web Audio API (16kHz / 24kHz)    • PDF Page Parsing & Extraction
-  • Live Transcripts & Citations    • Vector Embeddings & Hybrid Search
+[User Browser] ──(HTTP/WS)────────► [Render / FastAPI Backend Server]
+  • React 19 + Tailwind CSS          • High-Performance PyMuPDF Parser
+  • Citation Modal & Highlights      • Hybrid Retrieval (BM25 + Gemini RRF)
+  • Non-Silent TTS Synthesis         • Bi-directional WebSockets (Live Voice)
 ```
 
 ---
 
-## 2. Core Capabilities
+## 2. Deploying on Render (100% Free - Unlimited Large File Uploads)
 
-- **Multi-PDF Upload**: Upload one or multiple PDFs simultaneously.
-- **Page-Level Extraction**: Extracts and segments documents while preserving exact page provenance.
-- **RAG & Embeddings**: Generates dense semantic vectors using `gemini-embedding-2-preview` with hybrid lexical fallback.
-- **Anti-Hallucination Guardrails**: If information is absent from uploaded PDFs, the model explicitly refuses to fabricate answers.
-- **Gemini Live Voice**: Bidirectional low-latency voice conversations over WebSockets (`gemini-3.1-flash-live-preview`) with real-time speech transcription.
-- **Anonymous Workspace Isolation**: Each visitor receives an ephemeral workspace token (`x-workspace-id`) with partitioned vector stores.
+Deploying on **Render** gives you a full dedicated web service with **NO 4.5 MB serverless upload limit**, real WebSockets, and PyMuPDF document extraction.
+
+### Option A: Render Blueprints (Easiest - 1 Click)
+
+1. **Push your code to GitHub**.
+2. Log into [Render.com](https://dashboard.render.com/).
+3. Click **New +** -> **Blueprint**.
+4. Select your GitHub repository. Render will automatically read `render.yaml`.
+5. Under Environment Variables, set:
+   - `GEMINI_API_KEY`: `your_gemini_api_key_here`
+6. Click **Apply**. Render will automatically build the React frontend and deploy the FastAPI backend.
+
+### Option B: Manual Web Service on Render
+
+1. Go to [Render Dashboard](https://dashboard.render.com/) -> **New Web Service**.
+2. Select your repository.
+3. Choose **Python 3** environment.
+4. Set **Build Command**: `./build.sh`
+5. Set **Start Command**: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
+6. Under Environment Variables, add:
+   - `GEMINI_API_KEY`: `your_gemini_api_key_here`
+   - `PYTHON_VERSION`: `3.11.0`
+7. Select **Free Tier** and click **Create Web Service**.
 
 ---
 
-## 3. Local & Container Execution (Current Applet)
+## 3. Running Locally
 
-The repository runs a unified high-performance Node/Express + Vite server on port 3000:
-
+### Option A: Python FastAPI (Full Performance Mode)
 ```bash
-# Install dependencies
+# Build React frontend assets
 npm install
+npm run build:client
 
-# Start development server
-npm run dev
-
-# Build for production
-npm run build
-
-# Start production server
-npm start
-```
-
----
-
-## 4. Deploying to Vercel (Frontend / Full-Stack)
-
-1. **Push to GitHub**:
-   Ensure your code is pushed to your Git provider.
-
-2. **Import into Vercel**:
-   - Go to [Vercel Dashboard](https://vercel.com/new).
-   - Select your repository.
-   - Framework Preset: **Vite**
-   - Root Directory: `./`
-   - Build Command: `npm run build`
-   - Output Directory: `dist`
-
-3. **Configure Environment Variables in Vercel**:
-   - `GEMINI_API_KEY`: Your Google Gemini API Key.
-
----
-
-## 5. Deploying Python + FastAPI Backend (Standalone)
-
-The `/backend` folder contains a complete Python FastAPI + PyMuPDF implementation:
-
-### Running Locally:
-```bash
+# Start Python FastAPI backend
 cd backend
 python -m venv venv
-source venv/bin/activate
+# On Windows: .\venv\Scripts\activate
+# On Linux/Mac: source venv/bin/activate
 pip install -r requirements.txt
-export GEMINI_API_KEY="your-gemini-api-key"
+export GEMINI_API_KEY="your_api_key_here"
 uvicorn main:app --reload --port 8000
 ```
+Open `http://localhost:8000` in your browser.
 
-### Deploying to Google Cloud Run:
+### Option B: Node.js Express Dev Server
 ```bash
-cd backend
-gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/pdf-rag-backend
-gcloud run deploy pdf-rag-backend \
-  --image gcr.io/YOUR_PROJECT_ID/pdf-rag-backend \
-  --platform managed \
-  --region us-central1 \
-  --allow-unauthenticated \
-  --set-env-vars GEMINI_API_KEY="YOUR_KEY"
+npm install
+npm run dev
 ```
+Open `http://localhost:3000` in your browser.
 
-### Deploying to Render / Railway:
-- Set Build Command: `pip install -r backend/requirements.txt`
-- Set Start Command: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
-- Add Environment Variable: `GEMINI_API_KEY`
+---
+
+## 4. Deploying to Vercel (Optional Serverless Mode)
+
+If deploying to Vercel, note that Vercel enforces a **4.5 MB HTTP payload limit** for Serverless Functions. PDFs must be under 4.5 MB per upload request when using Vercel serverless functions.

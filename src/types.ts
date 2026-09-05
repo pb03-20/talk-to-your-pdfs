@@ -10,6 +10,16 @@ export interface DocumentMetadata {
   errorMessage?: string;
 }
 
+export interface DocumentChunk {
+  id: string;
+  workspaceId: string;
+  docId: string;
+  filename: string;
+  pageNumber: number;
+  chunkIndex: number;
+  text: string;
+}
+
 export interface SourceCitation {
   docId: string;
   filename: string;
