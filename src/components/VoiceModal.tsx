@@ -58,6 +58,9 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
   const isAiSpeakingRef = useRef(false);
   const bargeInFramesRef = useRef(0);
   const lastInterruptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const isModalOpenRef = useRef(false);
   useEffect(() => {
     isAiSpeakingRef.current = isAiSpeaking;
   }, [isAiSpeaking]);
@@ -72,6 +75,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
 
   // Connect when modal opens
   useEffect(() => {
+    isModalOpenRef.current = isOpen;
     if (!isOpen) {
       cleanup();
       return;
@@ -85,9 +89,17 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
   }, [isOpen, workspaceId]);
 
   const cleanup = () => {
+    if (reconnectTimerRef.current !== null) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+
     if (wsRef.current) {
-      wsRef.current.close();
+      const socket = wsRef.current;
+      // Clear the ref before closing so this intentional close cannot schedule
+      // an automatic reconnect from its onclose handler.
       wsRef.current = null;
+      socket.close();
     }
 
     if (processorRef.current) {
@@ -124,8 +136,11 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
     bargeInFramesRef.current = 0;
   };
 
-  const startLiveSession = async () => {
+  const startLiveSession = async (isReconnect = false) => {
     cleanup();
+    if (!isReconnect) {
+      reconnectAttemptsRef.current = 0;
+    }
     setIsConnecting(true);
     setErrorMessage(null);
     setIsPermissionDenied(false);
@@ -250,6 +265,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
       wsRef.current = ws;
 
       ws.onopen = () => {
+        reconnectAttemptsRef.current = 0;
         setIsConnecting(false);
         setIsConnected(true);
         setStatusMessage("Listening... Speak naturally to ask about your PDFs.");
@@ -361,15 +377,28 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
 
       ws.onerror = (err) => {
         console.warn("WebSocket connection state:", err);
-        setErrorMessage("Connection to live voice service failed. Please try again.");
-        setIsConnecting(false);
-        setIsConnected(false);
+        // The close event below schedules a retry. Keep the conversation UI
+        // usable rather than asking the user to restart it manually.
+        setStatusMessage("Voice connection interrupted — reconnecting...");
       };
 
       ws.onclose = () => {
+        // Ignore a close initiated by cleanup/onClose or by a newer session.
+        if (wsRef.current !== ws || !isModalOpenRef.current) return;
+
+        wsRef.current = null;
         setIsConnected(false);
         setIsConnecting(false);
-        setStatusMessage("Session ended.");
+        setIsAiSpeaking(false);
+        isAiSpeakingRef.current = false;
+
+        const attempt = reconnectAttemptsRef.current++;
+        const retryDelay = Math.min(1000 * 2 ** attempt, 10000);
+        setStatusMessage(`Voice connection interrupted — reconnecting in ${Math.ceil(retryDelay / 1000)}s...`);
+        reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = null;
+          if (isModalOpenRef.current) startLiveSession(true);
+        }, retryDelay);
       };
     } catch (err: any) {
       console.warn("Live voice session initialization:", err?.message || err);
