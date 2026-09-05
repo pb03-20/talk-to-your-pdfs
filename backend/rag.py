@@ -28,6 +28,7 @@ import math
 from typing import List, Dict, Any, Tuple, Optional
 from dotenv import load_dotenv
 from pymongo import MongoClient, ASCENDING
+from pymongo.errors import PyMongoError
 
 load_dotenv()
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
@@ -75,11 +76,25 @@ MONGODB_VECTOR_COLLECTION = os.environ.get(
 MONGODB_VECTOR_INDEX = os.environ.get("MONGODB_VECTOR_INDEX", "vector_index")
 
 _mongo_client: Optional[MongoClient] = None
+_mongo_disabled_reason: Optional[str] = None
 
 
 def mongodb_enabled() -> bool:
-    """Return whether MongoDB persistence has been configured."""
-    return bool(MONGODB_URI)
+    """Return whether MongoDB persistence is configured and reachable."""
+    return bool(MONGODB_URI) and _mongo_disabled_reason is None
+
+
+def _disable_mongodb(error: Exception) -> None:
+    """Fall back to local storage after a MongoDB connection failure."""
+    global _mongo_client, _mongo_disabled_reason
+    _mongo_disabled_reason = str(error)
+    if _mongo_client is not None:
+        _mongo_client.close()
+    _mongo_client = None
+    print(
+        "MongoDB persistence is unavailable; continuing with local workspace "
+        f"storage. Original error: {_mongo_disabled_reason}"
+    )
 
 
 def get_mongo_client() -> MongoClient:
@@ -91,11 +106,27 @@ def get_mongo_client() -> MongoClient:
             "MONGODB_URI is not set. Add your MongoDB connection string to .env."
         )
 
+    if _mongo_disabled_reason is not None:
+        raise RuntimeError("MongoDB persistence was disabled after a connection failure.")
+
     if _mongo_client is None:
-        _mongo_client = MongoClient(
-            MONGODB_URI,
-            serverSelectionTimeoutMS=10000,
-        )
+        client_options = {
+            "serverSelectionTimeoutMS": 5000,
+            "connectTimeoutMS": 5000,
+            "socketTimeoutMS": 20000,
+            "retryWrites": True,
+        }
+        # Atlas SRV connection strings require TLS. Do not weaken certificate
+        # verification to work around TLS errors.
+        if MONGODB_URI.startswith("mongodb+srv://"):
+            client_options["tls"] = True
+
+        _mongo_client = MongoClient(MONGODB_URI, **client_options)
+        try:
+            _mongo_client.admin.command("ping")
+        except PyMongoError as error:
+            _disable_mongodb(error)
+            raise
 
     return _mongo_client
 
@@ -132,8 +163,6 @@ def save_chunks_to_mongodb(
     """
     if not chunks:
         return 0
-
-    collection = get_mongo_collection()
 
     if generate_embeddings:
         texts = [c["text"] for c in chunks]
@@ -184,14 +213,19 @@ def save_chunks_to_mongodb(
 
     from pymongo import ReplaceOne
 
-    collection.bulk_write([
-        ReplaceOne(
-            operation["replace_one"]["filter"],
-            operation["replace_one"]["replacement"],
-            upsert=operation["replace_one"]["upsert"],
-        )
-        for operation in operations
-    ])
+    try:
+        collection = get_mongo_collection()
+        collection.bulk_write([
+            ReplaceOne(
+                operation["replace_one"]["filter"],
+                operation["replace_one"]["replacement"],
+                upsert=operation["replace_one"]["upsert"],
+            )
+            for operation in operations
+        ])
+    except PyMongoError as error:
+        _disable_mongodb(error)
+        return 0
 
     # A repeated upload may match documents whose values have not changed;
     # those are still successful writes/synchronizations.
@@ -203,25 +237,29 @@ def delete_document_chunks_from_mongodb(
     doc_id: str,
 ) -> int:
     """Delete all vector chunks belonging to one document."""
-    collection = get_mongo_collection()
-
-    result = collection.delete_many({
-        "workspace_id": str(workspace_id),
-        "doc_id": str(doc_id),
-    })
-
-    return result.deleted_count
+    try:
+        collection = get_mongo_collection()
+        result = collection.delete_many({
+            "workspace_id": str(workspace_id),
+            "doc_id": str(doc_id),
+        })
+        return result.deleted_count
+    except PyMongoError as error:
+        _disable_mongodb(error)
+        return 0
 
 
 def delete_workspace_chunks_from_mongodb(workspace_id: str) -> int:
     """Delete all vector chunks belonging to a workspace."""
-    collection = get_mongo_collection()
-
-    result = collection.delete_many({
-        "workspace_id": str(workspace_id),
-    })
-
-    return result.deleted_count
+    try:
+        collection = get_mongo_collection()
+        result = collection.delete_many({
+            "workspace_id": str(workspace_id),
+        })
+        return result.deleted_count
+    except PyMongoError as error:
+        _disable_mongodb(error)
+        return 0
 
 
 def vector_search_mongodb(
