@@ -621,29 +621,98 @@ async def websocket_live_voice(
     workspaceId: str = "default",
     responseLanguage: str = "auto",
 ):
-    await websocket.accept()
-    ws = get_or_create_workspace(workspaceId)
-    docs = ws["documents"]
-    doc_summary = "\n".join([f"- {d['filename']} ({d['totalPages']} pages)" for d in docs])
+    """
+    Continuous two-way voice conversation.
 
-    selected_language = responseLanguage.strip()[:32]
-    language_instruction = (
-        "Detect the language in the user's spoken audio and reply in that same language. "
-        "Do not infer their language from a browser, country, name, or locale. "
-        "For example, always reply in English when the user speaks English."
-        if not selected_language or selected_language.lower() == "auto"
-        else f"Reply in {selected_language}, unless the user explicitly asks to switch languages."
+    Behavior:
+        1. One WebSocket connection is created.
+        2. One Gemini Live session is created.
+        3. User can speak.
+        4. Gemini responds.
+        5. Gemini finishes the turn.
+        6. Browser automatically returns to listening.
+        7. User can speak again without clicking anything.
+        8. The same Gemini Live session continues until the user
+           disconnects, the API closes the session, or an error occurs.
+
+    The backend does NOT intentionally restart the Gemini session
+    after every question.
+    """
+
+    await websocket.accept()
+
+    ws = get_or_create_workspace(workspaceId)
+
+    # ---------------------------------------------------------
+    # Workspace / document information
+    # ---------------------------------------------------------
+
+    docs = ws.get("documents", [])
+
+    doc_summary = "\n".join(
+        [
+            f"- {d.get('filename', 'Unknown document')} "
+            f"({d.get('totalPages', 0)} pages)"
+            for d in docs
+        ]
     )
+
+    # ---------------------------------------------------------
+    # Language handling
+    # ---------------------------------------------------------
+
+    selected_language = (responseLanguage or "auto").strip()[:32]
+
+    if not selected_language or selected_language.lower() == "auto":
+        language_instruction = (
+            "Detect the language from the user's spoken audio and "
+            "reply in the same language. "
+            "Do not infer language from browser settings, country, "
+            "name, or locale."
+        )
+    else:
+        language_instruction = (
+            f"Reply in {selected_language}, unless the user explicitly "
+            "asks to switch languages."
+        )
+
+    # ---------------------------------------------------------
+    # Gemini Live system instruction
+    # ---------------------------------------------------------
 
     system_instruction = (
-        f"You are the voice assistant for 'Talk to Your PDFs'.\n"
-        f"Documents in workspace:\n{doc_summary or 'No documents'}\n"
-        f"Answer the user's questions clearly, concisely, and factually based on their PDFs. "
-        f"Cite page numbers when stating facts. If not in the PDFs, say you could not find it.\n"
-        f"LANGUAGE: {language_instruction}"
+        "You are the voice assistant for 'Talk to Your PDFs'.\n\n"
+
+        "VOICE CONVERSATION RULES:\n"
+        "1. Have a natural two-way conversation with the user.\n"
+        "2. After answering, remain ready for the user's next question.\n"
+        "3. Do not end the conversation after answering one question.\n"
+        "4. Treat the conversation as continuous.\n"
+        "5. Understand natural follow-up questions and references "
+        "within the current Live session.\n"
+        "6. Keep spoken answers concise and natural.\n"
+        "7. Do not say that the user needs to restart the session.\n"
+        "8. If the user interrupts you, stop your response and listen "
+        "to the user.\n\n"
+
+        f"Documents in workspace:\n"
+        f"{doc_summary or 'No documents have been uploaded.'}\n\n"
+
+        "PDF ANSWERING RULES:\n"
+        "Answer questions based on the uploaded PDFs when possible. "
+        "Cite page numbers when stating facts. "
+        "If information is not available in the PDFs, say that you "
+        "could not find it in the uploaded PDFs.\n\n"
+
+        f"LANGUAGE:\n{language_instruction}"
     )
 
+    # ---------------------------------------------------------
+    # Connect to Gemini Live
+    # ---------------------------------------------------------
+
     client = get_gemini_client()
+
     live_models = [
         "gemini-2.5-flash-native-audio-latest",
         "gemini-2.5-flash-native-audio-preview-12-2025",
@@ -652,99 +721,578 @@ async def websocket_live_voice(
 
     session = None
     live_connect_cm = None
-    for l_model in live_models:
+    connected_model = None
+
+    for live_model in live_models:
         try:
+            print(
+                f"[LIVE VOICE] Trying Gemini Live model: "
+                f"{live_model}"
+            )
+
             live_connect_cm = client.aio.live.connect(
-                model=l_model,
+                model=live_model,
                 config=types.LiveConnectConfig(
                     response_modalities=[types.Modality.AUDIO],
+
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
+                            prebuilt_voice_config=(
+                                types.PrebuiltVoiceConfig(
+                                    voice_name="Zephyr"
+                                )
+                            )
                         )
                     ),
-                    system_instruction=system_instruction
-                )
-            )
-            session = await live_connect_cm.__aenter__()
-            break
-        except Exception as conn_err:
-            print(f"Warning: Live connect failed for {l_model}: {conn_err}")
-            continue
 
-    if not session:
-        await websocket.send_json({"type": "error", "message": "Failed to connect to Gemini Live Voice service."})
-        await websocket.close()
+                    system_instruction=system_instruction,
+                ),
+            )
+
+            session = await live_connect_cm.__aenter__()
+            connected_model = live_model
+
+            print(
+                f"[LIVE VOICE] Connected successfully: "
+                f"{live_model}"
+            )
+
+            break
+
+        except Exception as conn_err:
+            print(
+                f"[LIVE VOICE] Connection failed for "
+                f"{live_model}: {conn_err}"
+            )
+
+            session = None
+            live_connect_cm = None
+
+    # ---------------------------------------------------------
+    # Could not connect
+    # ---------------------------------------------------------
+
+    if session is None:
+        try:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": (
+                        "Failed to connect to Gemini Live Voice service."
+                    ),
+                }
+            )
+        except Exception:
+            pass
+
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
         return
 
-    try:
-        await websocket.send_json({"type": "status", "message": "Gemini Live connected"})
+    # ---------------------------------------------------------
+    # Session state
+    # ---------------------------------------------------------
 
-        async def send_to_gemini():
-            while True:
-                data = await websocket.receive_json()
-                msg_type = data.get("type")
-                if msg_type == "audio" and data.get("audio"):
-                    audio_data = data["audio"]
-                    if isinstance(audio_data, str):
-                        audio_bytes = base64.b64decode(audio_data)
-                    else:
-                        audio_bytes = audio_data
-                    await session.send_realtime_input(
-                        audio=types.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
-                    )
-                elif msg_type == "text" and data.get("text"):
-                    try:
-                        await session.send_client_content(
-                            turns=[types.Content(parts=[types.Part.from_text(text=data["text"])])],
-                            turn_complete=True
-                        )
-                    except Exception as te:
-                        print(f"Text input error: {te}")
-                elif msg_type == "interrupt":
-                    # Stop only browser playback here. The next microphone
-                    # frames are sent as real-time input, allowing Gemini Live
-                    # to detect and handle the user's barge-in naturally.
-                    await websocket.send_json({"type": "interrupted"})
+    session_closed = False
 
-        async def receive_from_gemini():
-            async for response in session.receive():
-                server_content = response.server_content
-                if server_content is not None:
-                    if getattr(server_content, "interrupted", False):
-                        await websocket.send_json({"type": "interrupted"})
+    async def safe_send(message: dict):
+        """
+        Send a WebSocket message without crashing the voice session
+        if the browser has already disconnected.
+        """
+        try:
+            await websocket.send_json(message)
+            return True
+        except Exception:
+            return False
 
-                    model_turn = server_content.model_turn
-                    if model_turn is not None:
-                        for part in model_turn.parts:
-                            if part.inline_data:
-                                part_data = part.inline_data.data
-                                if isinstance(part_data, bytes):
-                                    audio_b64 = base64.b64encode(part_data).decode("utf-8")
-                                else:
-                                    audio_b64 = part_data
-                                await websocket.send_json({"type": "audio", "audio": audio_b64})
-                            if part.text:
-                                clean_text = re.sub(r"\*\*.*?\*\*", "", part.text).strip()
-                                if clean_text:
-                                    await websocket.send_json({"type": "outputTranscript", "text": clean_text})
+    async def close_live_session():
+        nonlocal session_closed
 
-                    if getattr(server_content, "turn_complete", False):
-                        await websocket.send_json({"type": "turnComplete"})
-                        await websocket.send_json({"type": "status", "message": "Listening for your next question..."})
+        if session_closed:
+            return
 
-        await asyncio.gather(send_to_gemini(), receive_from_gemini())
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        await websocket.send_json({"type": "error", "message": str(e)})
-    finally:
+        session_closed = True
+
         if live_connect_cm:
             try:
-                await live_connect_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
+                await live_connect_cm.__aexit__(
+                    None,
+                    None,
+                    None,
+                )
+            except Exception as close_err:
+                print(
+                    f"[LIVE VOICE] Session close error: "
+                    f"{close_err}"
+                )
 
+    try:
+        # -----------------------------------------------------
+        # Tell frontend that the session is ready
+        # -----------------------------------------------------
+
+        await safe_send(
+            {
+                "type": "status",
+                "message": "Gemini Live connected",
+                "model": connected_model,
+            }
+        )
+
+        await safe_send(
+            {
+                "type": "listening",
+                "message": "Listening...",
+            }
+        )
+
+        # =====================================================
+        # BROWSER → GEMINI
+        # =====================================================
+
+        async def send_to_gemini():
+            """
+            Continuously receive microphone frames from browser.
+
+            IMPORTANT:
+            This loop NEVER stops after turnComplete.
+
+            Therefore:
+
+                Question 1
+                    ↓
+                Gemini answer
+                    ↓
+                microphone continues
+                    ↓
+                Question 2
+                    ↓
+                Gemini answer
+                    ↓
+                microphone continues
+                    ↓
+                Question 3
+                    ↓
+                ...
+
+            until the WebSocket is closed.
+            """
+
+            while not session_closed:
+
+                data = await websocket.receive_json()
+
+                if not data:
+                    continue
+
+                msg_type = data.get("type")
+
+                # -------------------------------------------------
+                # Audio from microphone
+                # -------------------------------------------------
+
+                if msg_type == "audio":
+
+                    audio_data = data.get("audio")
+
+                    if not audio_data:
+                        continue
+
+                    try:
+
+                        if isinstance(audio_data, str):
+                            audio_bytes = base64.b64decode(
+                                audio_data
+                            )
+                        elif isinstance(audio_data, bytes):
+                            audio_bytes = audio_data
+                        elif isinstance(audio_data, list):
+                            audio_bytes = bytes(audio_data)
+                        else:
+                            print(
+                                "[LIVE VOICE] Unsupported audio type:",
+                                type(audio_data),
+                            )
+                            continue
+
+                        if not audio_bytes:
+                            continue
+
+                        # Send microphone audio to the SAME
+                        # Gemini Live session.
+                        await session.send_realtime_input(
+                            audio=types.Blob(
+                                data=audio_bytes,
+                                mime_type="audio/pcm;rate=16000",
+                            )
+                        )
+
+                    except Exception as audio_err:
+
+                        print(
+                            f"[LIVE VOICE] Audio send error: "
+                            f"{audio_err}"
+                        )
+
+                        await safe_send(
+                            {
+                                "type": "error",
+                                "message": str(audio_err),
+                            }
+                        )
+
+                # -------------------------------------------------
+                # Optional text input
+                # -------------------------------------------------
+
+                elif msg_type == "text":
+
+                    text = data.get("text")
+
+                    if not text or not str(text).strip():
+                        continue
+
+                    try:
+
+                        await session.send_client_content(
+                            turns=[
+                                types.Content(
+                                    parts=[
+                                        types.Part.from_text(
+                                            text=str(text)
+                                        )
+                                    ]
+                                )
+                            ],
+                            turn_complete=True,
+                        )
+
+                    except Exception as text_err:
+
+                        print(
+                            f"[LIVE VOICE] Text input error: "
+                            f"{text_err}"
+                        )
+
+                        await safe_send(
+                            {
+                                "type": "error",
+                                "message": str(text_err),
+                            }
+                        )
+
+                # -------------------------------------------------
+                # User interrupted AI
+                # -------------------------------------------------
+
+                elif msg_type == "interrupt":
+
+                    # The frontend should immediately stop playing
+                    # buffered AI audio.
+                    #
+                    # We deliberately DO NOT close the Gemini
+                    # session.
+                    #
+                    # The next microphone frames continue through
+                    # the SAME session.
+
+                    await safe_send(
+                        {
+                            "type": "interrupted",
+                        }
+                    )
+
+                # -------------------------------------------------
+                # Explicit stop from frontend
+                # -------------------------------------------------
+
+                elif msg_type in (
+                    "stop",
+                    "end",
+                    "close",
+                ):
+
+                    print(
+                        "[LIVE VOICE] User requested session stop."
+                    )
+
+                    break
+
+        # =====================================================
+        # GEMINI → BROWSER
+        # =====================================================
+
+        async def receive_from_gemini():
+            """
+            Continuously receive Gemini Live responses.
+
+            turnComplete DOES NOT close the session.
+
+            Instead it tells the frontend:
+
+                AI finished
+                    ↓
+                start listening again
+            """
+
+            try:
+
+                async for response in session.receive():
+
+                    if session_closed:
+                        break
+
+                    if response is None:
+                        continue
+
+                    server_content = response.server_content
+
+                    if server_content is None:
+                        continue
+
+                    # -------------------------------------------------
+                    # Gemini interrupted its own response
+                    # -------------------------------------------------
+
+                    if getattr(
+                        server_content,
+                        "interrupted",
+                        False,
+                    ):
+
+                        await safe_send(
+                            {
+                                "type": "interrupted",
+                            }
+                        )
+
+                        # Tell frontend that it can listen again.
+                        await safe_send(
+                            {
+                                "type": "listening",
+                                "message": "Listening...",
+                            }
+                        )
+
+                    # -------------------------------------------------
+                    # Gemini model response
+                    # -------------------------------------------------
+
+                    model_turn = getattr(
+                        server_content,
+                        "model_turn",
+                        None,
+                    )
+
+                    if model_turn is not None:
+
+                        for part in model_turn.parts:
+
+                            if session_closed:
+                                break
+
+                            # -----------------------------------------
+                            # Audio response
+                            # -----------------------------------------
+
+                            inline_data = getattr(
+                                part,
+                                "inline_data",
+                                None,
+                            )
+
+                            if inline_data is not None:
+
+                                part_data = inline_data.data
+
+                                if isinstance(
+                                    part_data,
+                                    bytes,
+                                ):
+                                    audio_b64 = base64.b64encode(
+                                        part_data
+                                    ).decode("utf-8")
+
+                                elif isinstance(
+                                    part_data,
+                                    str,
+                                ):
+                                    audio_b64 = part_data
+
+                                else:
+                                    continue
+
+                                await safe_send(
+                                    {
+                                        "type": "audio",
+                                        "audio": audio_b64,
+                                    }
+                                )
+
+                            # -----------------------------------------
+                            # Text/transcript response
+                            # -----------------------------------------
+
+                            part_text = getattr(
+                                part,
+                                "text",
+                                None,
+                            )
+
+                            if part_text:
+
+                                clean_text = re.sub(
+                                    r"\*\*.*?\*\*",
+                                    "",
+                                    part_text,
+                                ).strip()
+
+                                if clean_text:
+
+                                    await safe_send(
+                                        {
+                                            "type": "outputTranscript",
+                                            "text": clean_text,
+                                        }
+                                    )
+
+                    # -------------------------------------------------
+                    # TURN COMPLETE
+                    # -------------------------------------------------
+
+                    if getattr(
+                        server_content,
+                        "turn_complete",
+                        False,
+                    ):
+
+                        print(
+                            "[LIVE VOICE] Gemini turn complete. "
+                            "Returning to listening mode."
+                        )
+
+                        # Tell frontend AI has finished.
+                        await safe_send(
+                            {
+                                "type": "turnComplete",
+                            }
+                        )
+
+                        # IMPORTANT:
+                        #
+                        # DO NOT close session.
+                        # DO NOT reconnect.
+                        #
+                        # Frontend should now make sure microphone
+                        # capture is active again.
+
+                        await safe_send(
+                            {
+                                "type": "listening",
+                                "message": "Listening...",
+                            }
+                        )
+
+            except Exception as receive_err:
+
+                if not session_closed:
+
+                    print(
+                        f"[LIVE VOICE] Gemini receive error: "
+                        f"{receive_err}"
+                    )
+
+                    await safe_send(
+                        {
+                            "type": "error",
+                            "message": str(receive_err),
+                        }
+                    )
+
+        # =====================================================
+        # RUN BOTH DIRECTIONS FOR THE ENTIRE SESSION
+        # =====================================================
+
+        sender_task = asyncio.create_task(
+            send_to_gemini()
+        )
+
+        receiver_task = asyncio.create_task(
+            receive_from_gemini()
+        )
+
+        try:
+
+            # Keep both directions alive.
+            done, pending = await asyncio.wait(
+                [
+                    sender_task,
+                    receiver_task,
+                ],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # If one direction finishes, cancel the other.
+            for task in pending:
+                task.cancel()
+
+            for task in done:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        finally:
+
+            for task in (
+                sender_task,
+                receiver_task,
+            ):
+                if not task.done():
+                    task.cancel()
+
+            await asyncio.gather(
+                sender_task,
+                receiver_task,
+                return_exceptions=True,
+            )
+
+    except WebSocketDisconnect:
+
+        print(
+            "[LIVE VOICE] Browser disconnected."
+        )
+
+    except asyncio.CancelledError:
+
+        print(
+            "[LIVE VOICE] Voice task cancelled."
+        )
+
+    except Exception as e:
+
+        print(
+            f"[LIVE VOICE] Unexpected error: {e}"
+        )
+
+        await safe_send(
+            {
+                "type": "error",
+                "message": str(e),
+            }
+        )
+
+    finally:
+
+        await close_live_session()
+
+        print(
+            "[LIVE VOICE] Session closed."
+        )
 # Static files for built React SPA frontend (for Render / Docker single-container deployment)
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
