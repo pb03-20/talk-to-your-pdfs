@@ -81,6 +81,50 @@ def refresh_workspace_bm25(ws: Dict[str, Any]):
     else:
         ws["bm25_index"] = None
 
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+STORAGE_FILE = os.path.join(DATA_DIR, "workspace_store.json")
+
+def save_workspaces_to_disk():
+    try:
+        serializable = {}
+        for ws_id, ws in workspaces.items():
+            serializable[ws_id] = {
+                "id": ws["id"],
+                "created_at": ws.get("created_at", time.time()),
+                "documents": ws.get("documents", []),
+                "chunks": ws.get("chunks", []),
+                "messages": ws.get("messages", []),
+                "summaries": ws.get("summaries", {}),
+            }
+        with open(STORAGE_FILE, "w", encoding="utf-8") as f:
+            json.dump(serializable, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Failed to save workspaces to disk: {e}")
+
+def load_workspaces_from_disk():
+    if not os.path.exists(STORAGE_FILE):
+        return
+    try:
+        with open(STORAGE_FILE, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+            for ws_id, ws_data in loaded.items():
+                workspaces[ws_id] = {
+                    "id": ws_data["id"],
+                    "created_at": ws_data.get("created_at", time.time()),
+                    "documents": ws_data.get("documents", []),
+                    "chunks": ws_data.get("chunks", []),
+                    "messages": ws_data.get("messages", []),
+                    "summaries": ws_data.get("summaries", {}),
+                    "bm25_index": None,
+                }
+                refresh_workspace_bm25(workspaces[ws_id])
+        print(f"Loaded {len(workspaces)} workspace(s) from disk ({STORAGE_FILE}).")
+    except Exception as e:
+        print(f"Warning: Could not load workspaces from disk: {e}")
+
+load_workspaces_from_disk()
+
 class ChatRequest(BaseModel):
     message: str
 
@@ -101,6 +145,31 @@ def get_workspace(x_workspace_id: Optional[str] = Header("default")):
         "totalChunks": len(ws["chunks"]),
         "messages": ws["messages"]
     }
+
+@app.post("/api/workspace/reset")
+def reset_workspace(x_workspace_id: Optional[str] = Header("default")):
+    ws = get_or_create_workspace(x_workspace_id)
+    ws["documents"] = []
+    ws["chunks"] = []
+    ws["summaries"] = {}
+    ws["messages"] = [
+        {
+            "id": "welcome",
+            "role": "model",
+            "content": "Hello! Upload your PDFs in the sidebar, and I'll index them and answer with exact page citations.",
+            "timestamp": time.time()
+        }
+    ]
+    refresh_workspace_bm25(ws)
+    save_workspaces_to_disk()
+    return {"success": True, "message": "Workspace reset."}
+
+@app.post("/api/workspace/clear-chat")
+def clear_chat(x_workspace_id: Optional[str] = Header("default")):
+    ws = get_or_create_workspace(x_workspace_id)
+    ws["messages"] = []
+    save_workspaces_to_disk()
+    return {"success": True, "message": "Chat history cleared."}
 
 @app.post("/api/upload")
 async def upload_pdfs(
@@ -180,8 +249,9 @@ async def upload_pdfs(
             }
             processed.append(doc_meta)
 
-    # Rebuild workspace BM25 index with updated chunks
+    # Rebuild workspace BM25 index with updated chunks & persist to disk
     refresh_workspace_bm25(ws)
+    save_workspaces_to_disk()
 
     return {
         "success": True,
@@ -198,6 +268,7 @@ def delete_document(doc_id: str, x_workspace_id: Optional[str] = Header("default
     if "summaries" in ws and doc_id in ws["summaries"]:
         del ws["summaries"][doc_id]
     refresh_workspace_bm25(ws)
+    save_workspaces_to_disk()
     return {
         "success": True,
         "documents": ws["documents"],
@@ -337,6 +408,7 @@ async def chat_rag(req: ChatRequest, x_workspace_id: Optional[str] = Header("def
         "sources": sources,
         "timestamp": time.time()
     })
+    save_workspaces_to_disk()
 
     return {
         "answer": answer,
