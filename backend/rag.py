@@ -311,23 +311,33 @@ def embed_text_gemini(text: str) -> Tuple[List[float], str]:
     return vec.tolist(), "hash"
 
 
-def embed_texts_batch(texts: List[str]) -> List[Tuple[List[float], str]]:
-    """Embeds a list of texts. Uses the SDK's batch call when possible and
-    falls back to one-by-one on failure, so a single bad chunk can't sink
-    the whole document's embedding pass."""
+def embed_texts_batch(texts: List[str], batch_size: int = 20) -> List[Tuple[List[float], str]]:
+    """Embeds a list of texts using batching (20 items per API call) to avoid payload overload
+    and eliminate slow sequential retries."""
     if not texts:
         return []
+    results: List[Tuple[List[float], str]] = []
     client = get_gemini_client()
-    try:
-        res = client.models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=[t[:8000] for t in texts],
-        )
-        if getattr(res, "embeddings", None) and len(res.embeddings) == len(texts):
-            return [(e.values, "gemini") for e in res.embeddings]
-    except Exception:
-        pass
-    return [embed_text_gemini(t) for t in texts]
+
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        succeeded = False
+        try:
+            res = client.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=[t[:4000] for t in batch],
+            )
+            if getattr(res, "embeddings", None) and len(res.embeddings) == len(batch):
+                results.extend([(e.values, "gemini") for e in res.embeddings])
+                succeeded = True
+        except Exception:
+            pass
+
+        if not succeeded:
+            for t in batch:
+                results.append(embed_text_gemini(t))
+
+    return results
 
 
 def cosine_similarity(v1: List[float], v2: List[float]) -> float:
@@ -595,49 +605,30 @@ def fits_full_context(documents_chunks: Dict[str, List[Dict[str, Any]]]) -> bool
 # questions that no single chunk can, and gives the model a map of the doc.
 # --------------------------------------------------------------------------
 
-def summarize_document(filename: str, chunks: List[Dict[str, Any]], max_chunks_per_pass: int = 12) -> str:
+def summarize_document(filename: str, chunks: List[Dict[str, Any]]) -> str:
     """
-    Map-reduce summarization: summarizes the document in batches of chunks,
-    then summarizes the summaries, so long PDFs still get a coherent
-    document-level overview instead of only page-level snippets.
+    Fast abstractive summarization using representative chunk sampling.
     """
     if not chunks:
         return ""
-    client = get_gemini_client()
     ordered = sorted(chunks, key=lambda c: (c["page_number"], c["chunk_index"]))
+    if len(ordered) <= 8:
+        sampled = ordered
+    else:
+        step = (len(ordered) - 1) / 7.0
+        sampled = [ordered[int(i * step)] for i in range(8)]
 
-    batch_summaries = []
-    for i in range(0, len(ordered), max_chunks_per_pass):
-        batch = ordered[i:i + max_chunks_per_pass]
-        text_block = "\n\n".join(
-            f"[p.{c['page_number']}] {c['text']}" for c in batch
-        )
-        try:
-            res = client.models.generate_content(
-                model=GENERATION_MODEL,
-                contents=f"Summarize the key points of this excerpt from '{filename}' "
-                         f"in 4-6 bullet points, preserving any page-specific facts:\n\n{text_block}",
-                config=types.GenerateContentConfig(temperature=0.1),
-            )
-            batch_summaries.append(res.text or "")
-        except Exception:
-            continue
-
-    if not batch_summaries:
-        return ""
-    if len(batch_summaries) == 1:
-        return batch_summaries[0]
-
+    text_block = "\n\n".join(f"[Page {c['page_number']}] {c['text'][:400]}" for c in sampled)
+    client = get_gemini_client()
     try:
         res = client.models.generate_content(
             model=GENERATION_MODEL,
-            contents="Combine these section summaries of the same document into one coherent "
-                     "overview (8-10 bullet points, no repetition):\n\n" + "\n\n".join(batch_summaries),
+            contents=f"Summarize the key points of '{filename}' in 4-6 bullet points based on these excerpts:\n\n{text_block}",
             config=types.GenerateContentConfig(temperature=0.1),
         )
-        return res.text or "\n\n".join(batch_summaries)
+        return res.text or ""
     except Exception:
-        return "\n\n".join(batch_summaries)
+        return ""
 
 
 _OVERVIEW_PATTERNS = re.compile(

@@ -1,0 +1,47 @@
+{
+  "ws_1788567682909_8gmtbxq": {
+    "id": "ws_1788567682909_8gmtbxq",
+    "created_at": 1788567683.0528533,
+    "documents": [],
+    "chunks": [],
+    "messages": [
+      {
+        "id": "welcome",
+        "role": "model",
+        "content": "Hello! Upload your PDFs in the sidebar, and I'll index them and answer with exact page citations.",
+        "timestamp": 1788567683.0528533
+      }
+    ],
+    "summaries": {}
+  },
+  "ws_1788567840933_we1l6ui": {
+    "id": "ws_1788567840933_we1l6ui",
+    "created_at": 1788567840.9706786,
+    "documents": [],
+    "chunks": [],
+    "messages": [
+      {
+        "id": "welcome",
+        "role": "model",
+        "content": "Hello! Upload your PDFs in the sidebar, and I'll index them and answer with exact page citations.",
+        "timestamp": 1788567840.9706786
+      }
+    ],
+    "summaries": {}
+  },
+  "ws_1788568014481_p1b73cz": {
+    "id": "ws_1788568014481_p1b73cz",
+    "created_at": 1788568014.5867133,
+    "documents": [],
+    "chunks": [],
+    "messages": [
+      {
+        "id": "welcome",
+        "role": "model",
+        "content": "Hello! Upload your PDFs in the sidebar, and I'll index them and answer with exact page citations.",
+        "timestamp": 1788568014.5867133
+      }
+    ],
+    "summaries": {}
+  }
+}
