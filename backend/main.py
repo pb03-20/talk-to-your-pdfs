@@ -619,22 +619,28 @@ async def text_to_speech(req: TTSRequest):
 async def websocket_live_voice(
     websocket: WebSocket,
     workspaceId: str = "default",
-    language: str = "",
+    responseLanguage: str = "auto",
 ):
     await websocket.accept()
     ws = get_or_create_workspace(workspaceId)
     docs = ws["documents"]
     doc_summary = "\n".join([f"- {d['filename']} ({d['totalPages']} pages)" for d in docs])
 
+    selected_language = responseLanguage.strip()[:32]
+    language_instruction = (
+        "Detect the language in the user's spoken audio and reply in that same language. "
+        "Do not infer their language from a browser, country, name, or locale. "
+        "For example, always reply in English when the user speaks English."
+        if not selected_language or selected_language.lower() == "auto"
+        else f"Reply in {selected_language}, unless the user explicitly asks to switch languages."
+    )
+
     system_instruction = (
         f"You are the voice assistant for 'Talk to Your PDFs'.\n"
         f"Documents in workspace:\n{doc_summary or 'No documents'}\n"
         f"Answer the user's questions clearly, concisely, and factually based on their PDFs. "
         f"Cite page numbers when stating facts. If not in the PDFs, say you could not find it.\n"
-        "LANGUAGE: Detect the language the user speaks and reply in that same language. "
-        "Keep using the user's current spoken language unless they explicitly ask to switch. "
-        f"Their browser language preference is '{language or 'unknown'}'; this is only a hint, "
-        "not a reason to override the language heard in their audio."
+        f"LANGUAGE: {language_instruction}"
     )
 
     client = get_gemini_client()
@@ -725,6 +731,7 @@ async def websocket_live_voice(
 
                     if getattr(server_content, "turn_complete", False):
                         await websocket.send_json({"type": "turnComplete"})
+                        await websocket.send_json({"type": "status", "message": "Listening for your next question..."})
 
         await asyncio.gather(send_to_gemini(), receive_from_gemini())
     except WebSocketDisconnect:

@@ -46,6 +46,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isPermissionDenied, setIsPermissionDenied] = useState(false);
+  const [responseLanguage, setResponseLanguage] = useState("auto");
 
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -136,7 +137,10 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
     bargeInFramesRef.current = 0;
   };
 
-  const startLiveSession = async (isReconnect = false) => {
+  const startLiveSession = async (
+    isReconnect = false,
+    languageOverride = responseLanguage,
+  ) => {
     cleanup();
     if (!isReconnect) {
       reconnectAttemptsRef.current = 0;
@@ -259,7 +263,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const wsUrl = `${protocol}//${window.location.host}/api/live-voice?workspaceId=${encodeURIComponent(
         workspaceId
-      )}&language=${encodeURIComponent(navigator.language || "")}`;
+      )}&responseLanguage=${encodeURIComponent(languageOverride)}`;
 
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -380,6 +384,11 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
         // The close event below schedules a retry. Keep the conversation UI
         // usable rather than asking the user to restart it manually.
         setStatusMessage("Voice connection interrupted — reconnecting...");
+        // Some browsers do not emit close promptly after a WebSocket error.
+        // Closing explicitly guarantees that onclose starts the retry loop.
+        try {
+          ws.close();
+        } catch (_) {}
       };
 
       ws.onclose = () => {
@@ -478,6 +487,28 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
             </div>
           </div>
 
+          <label className="hidden sm:flex items-center gap-1.5 text-[10px] text-zinc-500">
+            <span>Reply in</span>
+            <select
+              value={responseLanguage}
+              onChange={(event) => {
+                setResponseLanguage(event.target.value);
+                // A new Live session applies the selected voice language.
+                startLiveSession(false, event.target.value);
+              }}
+              className="bg-white border border-zinc-200 rounded-lg px-1.5 py-1 text-zinc-700 outline-none"
+              title="Choose Auto to match the language you speak"
+            >
+              <option value="auto">Auto</option>
+              <option value="English">English</option>
+              <option value="Hindi">Hindi</option>
+              <option value="Bengali">Bengali</option>
+              <option value="Tamil">Tamil</option>
+              <option value="Telugu">Telugu</option>
+              <option value="Marathi">Marathi</option>
+            </select>
+          </label>
+
           <div className="flex items-center space-x-1.5">
             <a
               id="btn-open-voice-newtab"
@@ -563,6 +594,9 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
                 : "Connecting..."}
             </span>
             <p className="text-xs text-zinc-500 mt-1 max-w-sm">{statusMessage}</p>
+            {responseLanguage === "auto" && (
+              <p className="text-[10px] text-zinc-400 mt-1">Replies follow the language you speak.</p>
+            )}
           </div>
 
           {isPermissionDenied ? (
