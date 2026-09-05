@@ -11,6 +11,10 @@ import base64
 import asyncio
 from typing import List, Dict, Any, Optional
 
+from dotenv import load_dotenv
+load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel

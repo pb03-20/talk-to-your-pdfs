@@ -25,6 +25,10 @@ import os
 import re
 import math
 from typing import List, Dict, Any, Tuple, Optional
+from dotenv import load_dotenv
+
+load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 import fitz  # PyMuPDF
 import numpy as np
