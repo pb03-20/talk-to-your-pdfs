@@ -126,7 +126,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
-      } catch (e) {}
+      } catch (e) { }
       recognitionRef.current = null;
     }
 
@@ -209,7 +209,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
         setIsAiSpeaking(false);
         isAiSpeakingRef.current = false;
         if (inputAudioCtxRef.current && inputAudioCtxRef.current.state === "suspended") {
-          inputAudioCtxRef.current.resume().catch(() => {});
+          inputAudioCtxRef.current.resume().catch(() => { });
         }
         setStatusMessage("Listening... Speak naturally to ask about your PDFs.");
       };
@@ -225,19 +225,27 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
           // Gemini itself receives the raw audio and detects the spoken language.
           rec.lang = navigator.language || "en-US";
           rec.onresult = (evt: any) => {
-            let fullText = "";
+            let finalText = "";
+            let interimText = "";
             for (let i = evt.resultIndex; i < evt.results.length; i++) {
-              fullText += evt.results[i][0].transcript;
+              const transcript = evt.results[i][0].transcript;
+              if (evt.results[i].isFinal) {
+                finalText += transcript;
+              } else {
+                interimText += transcript;
+              }
             }
-            if (fullText.trim()) {
-              appendTranscript("user", fullText.trim());
+            if (finalText.trim()) {
+              appendTranscript("user", finalText.trim(), true);
+            } else if (interimText.trim()) {
+              appendTranscript("user", interimText.trim(), false);
             }
           };
           rec.onend = () => {
             if (isOpen && !isMutedRef.current && recognitionRef.current) {
               try {
                 rec.start();
-              } catch (e) {}
+              } catch (e) { }
             }
           };
           rec.start();
@@ -251,7 +259,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
       const inputCtx = new AudioCtxClass({ sampleRate: 16000 });
       inputAudioCtxRef.current = inputCtx;
       if (inputCtx.state === "suspended") {
-        inputCtx.resume().catch(() => {});
+        inputCtx.resume().catch(() => { });
       }
 
       const source = inputCtx.createMediaStreamSource(stream);
@@ -274,7 +282,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
         setIsConnected(true);
         setStatusMessage("Listening... Speak naturally to ask about your PDFs.");
         if (inputCtx.state === "suspended") {
-          inputCtx.resume().catch(() => {});
+          inputCtx.resume().catch(() => { });
         }
 
         // Hook up audio processor once connected
@@ -290,7 +298,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
           }
 
           if (inputCtx.state === "suspended") {
-            inputCtx.resume().catch(() => {});
+            inputCtx.resume().catch(() => { });
           }
 
           const inputData = e.inputBuffer.getChannelData(0);
@@ -358,7 +366,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
               setIsAiSpeaking(false);
               isAiSpeakingRef.current = false;
               if (inputAudioCtxRef.current && inputAudioCtxRef.current.state === "suspended") {
-                inputAudioCtxRef.current.resume().catch(() => {});
+                inputAudioCtxRef.current.resume().catch(() => { });
               }
               setStatusMessage("Listening... Speak naturally to ask about your PDFs.");
             }
@@ -368,7 +376,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
             isAiSpeakingRef.current = false;
             bargeInFramesRef.current = 0;
             if (inputAudioCtxRef.current && inputAudioCtxRef.current.state === "suspended") {
-              inputAudioCtxRef.current.resume().catch(() => {});
+              inputAudioCtxRef.current.resume().catch(() => { });
             }
             setStatusMessage("Listening... Speak naturally to ask about your PDFs.");
           } else if (data.type === "error") {
@@ -388,7 +396,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
         // Closing explicitly guarantees that onclose starts the retry loop.
         try {
           ws.close();
-        } catch (_) {}
+        } catch (_) { }
       };
 
       ws.onclose = () => {
@@ -417,7 +425,11 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
     }
   };
 
-  const appendTranscript = (speaker: "user" | "gemini", textChunk: string) => {
+  const appendTranscript = (
+    speaker: "user" | "gemini",
+    textChunk: string,
+    replaceMode: boolean = false // true = replace current line (browser speech interim), false = append (Gemini streaming chunks)
+  ) => {
     setTranscripts((prev) => {
       const last = prev[prev.length - 1];
       if (last && last.speaker === speaker && last.isStreaming) {
@@ -425,7 +437,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
           ...prev.slice(0, -1),
           {
             ...last,
-            text: last.text + " " + textChunk.trim(),
+            text: replaceMode ? textChunk.trim() : last.text + " " + textChunk.trim(),
           },
         ];
       }
@@ -440,7 +452,6 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
       ];
     });
   };
-
   const handleInterrupt = () => {
     if (playerRef.current) {
       playerRef.current.stop();
@@ -476,9 +487,8 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
               <h3 className="text-sm font-semibold text-zinc-900 flex items-center space-x-2">
                 <span>Gemini Live Voice</span>
                 <span
-                  className={`w-2 h-2 rounded-full ${
-                    isConnected ? "bg-emerald-500 animate-ping" : "bg-zinc-300"
-                  }`}
+                  className={`w-2 h-2 rounded-full ${isConnected ? "bg-emerald-500 animate-ping" : "bg-zinc-300"
+                    }`}
                 />
               </h3>
               <p className="text-[11px] text-zinc-500">
@@ -537,32 +547,29 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
             {isConnected && (
               <>
                 <div
-                  className={`absolute inset-0 rounded-full transition-all duration-300 ${
-                    isAiSpeaking
-                      ? "bg-indigo-500/20 animate-ping"
-                      : isMuted
+                  className={`absolute inset-0 rounded-full transition-all duration-300 ${isAiSpeaking
+                    ? "bg-indigo-500/20 animate-ping"
+                    : isMuted
                       ? "bg-zinc-200"
                       : "bg-emerald-500/20 animate-pulse"
-                  }`}
+                    }`}
                 />
                 <div
-                  className={`absolute inset-2 rounded-full transition-all duration-300 ${
-                    isAiSpeaking ? "bg-indigo-500/10" : "bg-emerald-500/10"
-                  }`}
+                  className={`absolute inset-2 rounded-full transition-all duration-300 ${isAiSpeaking ? "bg-indigo-500/10" : "bg-emerald-500/10"
+                    }`}
                 />
               </>
             )}
 
             <div
-              className={`w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-md ${
-                isAiSpeaking
-                  ? "bg-indigo-600 text-white shadow-indigo-200"
-                  : isMuted
+              className={`w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-md ${isAiSpeaking
+                ? "bg-indigo-600 text-white shadow-indigo-200"
+                : isMuted
                   ? "bg-zinc-200 text-zinc-500"
                   : isConnected
-                  ? "bg-zinc-900 text-white"
-                  : "bg-zinc-100 text-zinc-400"
-              }`}
+                    ? "bg-zinc-900 text-white"
+                    : "bg-zinc-100 text-zinc-400"
+                }`}
             >
               {isAiSpeaking ? (
                 <Volume2 className="w-7 h-7 animate-bounce" />
@@ -577,21 +584,20 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
           {/* Status badge */}
           <div className="mt-3">
             <span
-              className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${
-                isAiSpeaking
-                  ? "bg-indigo-50 text-indigo-700 border border-indigo-200/60"
-                  : isConnected
+              className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${isAiSpeaking
+                ? "bg-indigo-50 text-indigo-700 border border-indigo-200/60"
+                : isConnected
                   ? "bg-emerald-50 text-emerald-700 border border-emerald-200/60"
                   : "bg-zinc-100 text-zinc-600"
-              }`}
+                }`}
             >
               {isAiSpeaking
                 ? "AI Speaking — you can interrupt"
                 : isMuted
-                ? "Microphone Muted"
-                : isConnected
-                ? "Two-way listening"
-                : "Connecting..."}
+                  ? "Microphone Muted"
+                  : isConnected
+                    ? "Two-way listening"
+                    : "Connecting..."}
             </span>
             <p className="text-xs text-zinc-500 mt-1 max-w-sm">{statusMessage}</p>
             {responseLanguage === "auto" && (
@@ -657,11 +663,10 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
             transcripts.map((item) => (
               <div
                 key={item.id}
-                className={`p-3 rounded-2xl text-xs sm:text-sm leading-relaxed ${
-                  item.speaker === "user"
-                    ? "bg-zinc-900 text-white ml-8 rounded-tr-xs"
-                    : "bg-white text-zinc-800 border border-zinc-200 mr-8 rounded-tl-xs shadow-2xs"
-                }`}
+                className={`p-3 rounded-2xl text-xs sm:text-sm leading-relaxed ${item.speaker === "user"
+                  ? "bg-zinc-900 text-white ml-8 rounded-tr-xs"
+                  : "bg-white text-zinc-800 border border-zinc-200 mr-8 rounded-tl-xs shadow-2xs"
+                  }`}
               >
                 <div className="text-[10px] font-semibold mb-1 opacity-70 uppercase tracking-wider">
                   {item.speaker === "user" ? "You (Voice)" : "Gemini (Spoken)"}
@@ -679,11 +684,10 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
             <button
               id="btn-voice-mute"
               onClick={toggleMute}
-              className={`p-3 rounded-xl transition-colors ${
-                isMuted
-                  ? "bg-rose-100 text-rose-700"
-                  : "bg-zinc-100 hover:bg-zinc-200 text-zinc-700"
-              }`}
+              className={`p-3 rounded-xl transition-colors ${isMuted
+                ? "bg-rose-100 text-rose-700"
+                : "bg-zinc-100 hover:bg-zinc-200 text-zinc-700"
+                }`}
               title={isMuted ? "Unmute Mic" : "Mute Mic"}
             >
               {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
