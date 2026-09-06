@@ -663,7 +663,14 @@ async def websocket_live_voice(
                             prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
                         )
                     ),
-                    system_instruction=system_instruction
+                    system_instruction=system_instruction,
+                    realtime_input_config=types.RealtimeInputConfig(
+                        automatic_activity_detection=types.AutomaticActivityDetection(
+                            disabled=False,
+                            end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                            silence_duration_ms=800,
+                        )
+                    ),
                 )
             )
             session = await live_connect_cm.__aenter__()
@@ -710,6 +717,8 @@ async def websocket_live_voice(
         async def receive_from_gemini():
             async for response in session.receive():
                 server_content = response.server_content
+                print(f"[live-voice] got response: server_content={server_content is not None}, "
+                      f"turn_complete={getattr(server_content, 'turn_complete', None) if server_content else None}")
                 if server_content is not None:
                     if getattr(server_content, "interrupted", False):
                         await websocket.send_json({"type": "interrupted"})
@@ -737,6 +746,7 @@ async def websocket_live_voice(
     except WebSocketDisconnect:
         pass
     except Exception as e:
+        print(f"[live-voice] session error: {e}")
         await websocket.send_json({"type": "error", "message": str(e)})
     finally:
         if live_connect_cm:

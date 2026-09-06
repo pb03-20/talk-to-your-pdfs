@@ -291,13 +291,17 @@ export default function App() {
   };
 
   // TTS Read Aloud
+  const ttsRequestIdRef = useRef(0);
+
   const handlePlayTTS = async (text: string) => {
+    const requestId = ++ttsRequestIdRef.current; // invalidate any older in-flight request
+
     if (ttsPlayerRef.current) {
       ttsPlayerRef.current.stop();
     }
+    ttsPlayerRef.current = new LiveAudioPlayer(); // fresh player, resets nextStartTime to 0
 
     setPlayingMessageId("loading");
-
     try {
       const res = await fetch("/api/tts", {
         method: "POST",
@@ -305,26 +309,26 @@ export default function App() {
         body: JSON.stringify({ text }),
       });
 
+      if (requestId !== ttsRequestIdRef.current) return; // a newer tap superseded this one — drop it
+
       if (res.ok) {
         const data = await res.json();
         if (data.audio) {
-          if (!ttsPlayerRef.current) {
-            ttsPlayerRef.current = new LiveAudioPlayer();
-          }
           ttsPlayerRef.current.playChunk(data.audio);
           setPlayingMessageId("playing");
           return;
         }
       }
-      // Browser fallback if server TTS unavailable
+
+      // Server TTS unavailable or returned no audio — fall back to browser speech
       speakWithBrowser(text, () => setPlayingMessageId(null));
       setPlayingMessageId("playing");
     } catch (e) {
+      if (requestId !== ttsRequestIdRef.current) return;
       speakWithBrowser(text, () => setPlayingMessageId(null));
       setPlayingMessageId("playing");
     }
   };
-
   const handleStopTTS = () => {
     if (ttsPlayerRef.current) {
       ttsPlayerRef.current.stop();
