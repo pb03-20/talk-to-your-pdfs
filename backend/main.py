@@ -667,8 +667,9 @@ async def websocket_live_voice(
                     realtime_input_config=types.RealtimeInputConfig(
                         automatic_activity_detection=types.AutomaticActivityDetection(
                             disabled=False,
-                            end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
-                            silence_duration_ms=800,
+                            start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                            end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                            silence_duration_ms=500,
                         )
                     ),
                 )
@@ -717,8 +718,11 @@ async def websocket_live_voice(
         async def receive_from_gemini():
             async for response in session.receive():
                 server_content = response.server_content
-                print(f"[live-voice] got response: server_content={server_content is not None}, "
-                      f"turn_complete={getattr(server_content, 'turn_complete', None) if server_content else None}")
+                print(
+                    f"[live-voice] response received: has_content={server_content is not None}, "
+                    f"turn_complete={getattr(server_content, 'turn_complete', None) if server_content else None}, "
+                    f"interrupted={getattr(server_content, 'interrupted', None) if server_content else None}"
+                )
                 if server_content is not None:
                     if getattr(server_content, "interrupted", False):
                         await websocket.send_json({"type": "interrupted"})

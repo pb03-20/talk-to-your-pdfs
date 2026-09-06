@@ -208,10 +208,17 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
       playerRef.current.onPlaybackComplete = () => {
         setIsAiSpeaking(false);
         isAiSpeakingRef.current = false;
-        if (inputAudioCtxRef.current && inputAudioCtxRef.current.state === "suspended") {
-          inputAudioCtxRef.current.resume().catch(() => { });
+        setStatusMessage("Preparing for your next question...");
+        // Gemini's automatic end-of-turn detection becomes unreliable the
+        // longer a single Live session runs (works reliably on a fresh
+        // session's first turn). Restarting the session after every
+        // completed AI response makes each turn behave like a fresh
+        // "turn 1", trading cross-turn memory for reliability.
+        if (isModalOpenRef.current) {
+          setTimeout(() => {
+            if (isModalOpenRef.current) startLiveSession(true);
+          }, 300);
         }
-        setStatusMessage("Listening... Speak naturally to ask about your PDFs.");
       };
 
       // Optional browser speech recognition for real-time user voice transcript
@@ -238,7 +245,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
             if (finalText.trim()) {
               appendTranscript("user", finalText.trim(), true);
             } else if (interimText.trim()) {
-              appendTranscript("user", interimText.trim(), false);
+              appendTranscript("user", interimText.trim(), true);
             }
           };
           rec.onend = () => {
@@ -428,7 +435,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
   const appendTranscript = (
     speaker: "user" | "gemini",
     textChunk: string,
-    replaceMode: boolean = false // true = replace current line (browser speech interim), false = append (Gemini streaming chunks)
+    replaceMode: boolean = false
   ) => {
     setTranscripts((prev) => {
       const last = prev[prev.length - 1];
@@ -452,6 +459,7 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
       ];
     });
   };
+
   const handleInterrupt = () => {
     if (playerRef.current) {
       playerRef.current.stop();

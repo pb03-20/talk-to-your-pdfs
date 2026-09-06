@@ -36,6 +36,7 @@ export default function App() {
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   const ttsPlayerRef = useRef<LiveAudioPlayer | null>(null);
+  const ttsRequestIdRef = useRef(0);
 
   // Fetch workspace state
   const loadWorkspace = async (idToLoad: string) => {
@@ -291,8 +292,6 @@ export default function App() {
   };
 
   // TTS Read Aloud
-  const ttsRequestIdRef = useRef(0);
-
   const handlePlayTTS = async (text: string) => {
     const requestId = ++ttsRequestIdRef.current; // invalidate any older in-flight request
 
@@ -302,6 +301,7 @@ export default function App() {
     ttsPlayerRef.current = new LiveAudioPlayer(); // fresh player, resets nextStartTime to 0
 
     setPlayingMessageId("loading");
+
     try {
       const res = await fetch("/api/tts", {
         method: "POST",
@@ -319,8 +319,7 @@ export default function App() {
           return;
         }
       }
-
-      // Server TTS unavailable or returned no audio — fall back to browser speech
+      // Browser fallback if server TTS unavailable
       speakWithBrowser(text, () => setPlayingMessageId(null));
       setPlayingMessageId("playing");
     } catch (e) {
@@ -329,6 +328,7 @@ export default function App() {
       setPlayingMessageId("playing");
     }
   };
+
   const handleStopTTS = () => {
     if (ttsPlayerRef.current) {
       ttsPlayerRef.current.stop();
