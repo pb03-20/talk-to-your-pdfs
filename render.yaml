@@ -2,7 +2,7 @@ services:
   - type: web
     name: talk-to-your-pdfs
     runtime: docker
-    healthCheckPath: /health
+    healthCheckPath: /api/health
     envVars:
       - key: GEMINI_API_KEY
         sync: false

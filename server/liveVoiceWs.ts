@@ -42,7 +42,7 @@ RULES:
       clientWs.send(JSON.stringify({ type: "status", status: "connecting", message: "Connecting to Gemini Live API..." }));
 
       liveSession = await ai.live.connect({
-        model: "gemini-2.5-flash",
+        model: "gemini-2.0-flash-live-preview-04-09",
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
@@ -132,7 +132,7 @@ RULES:
             // User interrupted — send an empty end-of-turn to stop the AI mid-response
             try {
               liveSession.sendRealtimeInput({ audio: { data: "", mimeType: "audio/pcm;rate=16000" } });
-            } catch (_) {}
+            } catch (_) { }
           }
         } catch (e) {
           console.error("Error sending input to Live API session:", e);

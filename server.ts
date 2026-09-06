@@ -110,94 +110,94 @@ async function startServer() {
       });
     },
     async (req, res) => {
-    const wsId = getWorkspaceId(req);
-    const files = req.files as Express.Multer.File[];
+      const wsId = getWorkspaceId(req);
+      const files = req.files as Express.Multer.File[];
 
-    if (!files || files.length === 0) {
-      return res.status(400).json({ error: "No files uploaded" });
-    }
-
-    const results = [];
-
-    for (const file of files) {
-      const docId = `doc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const filename = Buffer.from(file.originalname, "latin1").toString("utf8");
-
-      // Initial document metadata
-      workspaceStore.addDocument(wsId, {
-        id: docId,
-        workspaceId: wsId,
-        filename,
-        fileSize: file.size,
-        totalPages: 0,
-        totalChunks: 0,
-        uploadedAt: new Date().toISOString(),
-        status: "processing",
-      });
-
-      try {
-        // 1. Extract text and pages
-        const parseResult = await extractPdfText(file.buffer);
-
-        // 2. Chunk text
-        const chunks = chunkDocumentPages(
-          wsId,
-          docId,
-          filename,
-          parseResult.pages,
-          700,
-          100
-        );
-
-        // 3. Generate embeddings
-        await embedChunks(chunks);
-
-        // 4. Save to vector index
-        workspaceStore.addChunks(wsId, chunks);
-
-        // 5. Update status
-        workspaceStore.updateDocumentStatus(
-          wsId,
-          docId,
-          "ready",
-          chunks.length,
-          parseResult.totalPages
-        );
-
-        results.push({
-          docId,
-          filename,
-          pages: parseResult.totalPages,
-          chunks: chunks.length,
-          status: "ready",
-        });
-      } catch (err: any) {
-        console.error(`Error processing file ${filename}:`, err);
-        workspaceStore.updateDocumentStatus(
-          wsId,
-          docId,
-          "error",
-          0,
-          0,
-          err?.message || "Failed to parse PDF"
-        );
-        results.push({
-          docId,
-          filename,
-          status: "error",
-          error: err?.message || "Parsing error",
-        });
+      if (!files || files.length === 0) {
+        return res.status(400).json({ error: "No files uploaded" });
       }
-    }
 
-    const updatedWs = workspaceStore.getOrCreateWorkspace(wsId);
-    res.json({
-      success: true,
-      processed: results,
-      documents: updatedWs.documents,
-      totalChunks: updatedWs.chunks.length,
+      const results = [];
+
+      for (const file of files) {
+        const docId = `doc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const filename = Buffer.from(file.originalname, "latin1").toString("utf8");
+
+        // Initial document metadata
+        workspaceStore.addDocument(wsId, {
+          id: docId,
+          workspaceId: wsId,
+          filename,
+          fileSize: file.size,
+          totalPages: 0,
+          totalChunks: 0,
+          uploadedAt: new Date().toISOString(),
+          status: "processing",
+        });
+
+        try {
+          // 1. Extract text and pages
+          const parseResult = await extractPdfText(file.buffer);
+
+          // 2. Chunk text
+          const chunks = chunkDocumentPages(
+            wsId,
+            docId,
+            filename,
+            parseResult.pages,
+            700,
+            100
+          );
+
+          // 3. Generate embeddings
+          await embedChunks(chunks);
+
+          // 4. Save to vector index
+          workspaceStore.addChunks(wsId, chunks);
+
+          // 5. Update status
+          workspaceStore.updateDocumentStatus(
+            wsId,
+            docId,
+            "ready",
+            chunks.length,
+            parseResult.totalPages
+          );
+
+          results.push({
+            docId,
+            filename,
+            pages: parseResult.totalPages,
+            chunks: chunks.length,
+            status: "ready",
+          });
+        } catch (err: any) {
+          console.error(`Error processing file ${filename}:`, err);
+          workspaceStore.updateDocumentStatus(
+            wsId,
+            docId,
+            "error",
+            0,
+            0,
+            err?.message || "Failed to parse PDF"
+          );
+          results.push({
+            docId,
+            filename,
+            status: "error",
+            error: err?.message || "Parsing error",
+          });
+        }
+      }
+
+      const updatedWs = workspaceStore.getOrCreateWorkspace(wsId);
+      res.json({
+        success: true,
+        processed: results,
+        documents: updatedWs.documents,
+        totalChunks: updatedWs.chunks.length,
+      });
     });
-  });
 
   // Preload sample document
   app.post("/api/sample-doc", async (req, res) => {
@@ -355,7 +355,7 @@ async function startServer() {
         for (let attempt = 1; attempt <= 2; attempt++) {
           try {
             const response = await ai.models.generateContent({
-              model: "gemini-2.5-flash",
+              model: "gemini-2.5-flash-preview-tts",
               contents: [{ parts: [{ text: chunk }] }],
               config: {
                 responseModalities: [Modality.AUDIO],
@@ -454,4 +454,6 @@ async function startServer() {
   });
 }
 
+
 startServer();
+
