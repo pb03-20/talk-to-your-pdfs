@@ -556,10 +556,10 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
               <>
                 <div
                   className={`absolute inset-0 rounded-full transition-all duration-300 ${isAiSpeaking
-                      ? "bg-indigo-500/20 animate-ping"
-                      : isMuted
-                        ? "bg-zinc-200"
-                        : "bg-emerald-500/20 animate-pulse"
+                    ? "bg-indigo-500/20 animate-ping"
+                    : isMuted
+                      ? "bg-zinc-200"
+                      : "bg-emerald-500/20 animate-pulse"
                     }`}
                 />
                 <div
@@ -571,12 +571,12 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
 
             <div
               className={`w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-md ${isAiSpeaking
-                  ? "bg-indigo-600 text-white shadow-indigo-200"
-                  : isMuted
-                    ? "bg-zinc-200 text-zinc-500"
-                    : isConnected
-                      ? "bg-zinc-900 text-white"
-                      : "bg-zinc-100 text-zinc-400"
+                ? "bg-indigo-600 text-white shadow-indigo-200"
+                : isMuted
+                  ? "bg-zinc-200 text-zinc-500"
+                  : isConnected
+                    ? "bg-zinc-900 text-white"
+                    : "bg-zinc-100 text-zinc-400"
                 }`}
             >
               {isAiSpeaking ? (
@@ -593,10 +593,10 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
           <div className="mt-3">
             <span
               className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${isAiSpeaking
-                  ? "bg-indigo-50 text-indigo-700 border border-indigo-200/60"
-                  : isConnected
-                    ? "bg-emerald-50 text-emerald-700 border border-emerald-200/60"
-                    : "bg-zinc-100 text-zinc-600"
+                ? "bg-indigo-50 text-indigo-700 border border-indigo-200/60"
+                : isConnected
+                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200/60"
+                  : "bg-zinc-100 text-zinc-600"
                 }`}
             >
               {isAiSpeaking
@@ -672,8 +672,8 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
               <div
                 key={item.id}
                 className={`p-3 rounded-2xl text-xs sm:text-sm leading-relaxed ${item.speaker === "user"
-                    ? "bg-zinc-900 text-white ml-8 rounded-tr-xs"
-                    : "bg-white text-zinc-800 border border-zinc-200 mr-8 rounded-tl-xs shadow-2xs"
+                  ? "bg-zinc-900 text-white ml-8 rounded-tr-xs"
+                  : "bg-white text-zinc-800 border border-zinc-200 mr-8 rounded-tl-xs shadow-2xs"
                   }`}
               >
                 <div className="text-[10px] font-semibold mb-1 opacity-70 uppercase tracking-wider">
@@ -693,8 +693,8 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
               id="btn-voice-mute"
               onClick={toggleMute}
               className={`p-3 rounded-xl transition-colors ${isMuted
-                  ? "bg-rose-100 text-rose-700"
-                  : "bg-zinc-100 hover:bg-zinc-200 text-zinc-700"
+                ? "bg-rose-100 text-rose-700"
+                : "bg-zinc-100 hover:bg-zinc-200 text-zinc-700"
                 }`}
               title={isMuted ? "Unmute Mic" : "Mute Mic"}
             >
