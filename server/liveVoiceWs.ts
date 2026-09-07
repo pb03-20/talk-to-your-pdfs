@@ -20,8 +20,16 @@ const LIVE_MODEL_CANDIDATES = [
 /** A hung Live handshake must fail loudly rather than hang the client. */
 const CONNECT_TIMEOUT_MS = 12000;
 
-/** Rough character budget for document context handed to the voice session. */
-const CONTEXT_CHAR_BUDGET = 30000;
+/**
+ * Rough character budget for document context handed to the voice session.
+ *
+ * This is deliberately modest. Everything here sits in the system instruction
+ * for the life of the session, so a large budget eats the context window
+ * before the conversation even starts, and audio tokens accumulate quickly on
+ * top of it. Combined with the sliding-window compression configured below,
+ * this keeps sessions alive across many turns.
+ */
+const CONTEXT_CHAR_BUDGET = 12000;
 
 const LANGUAGE_CODES: Record<string, string> = {
   English: "en-US",
@@ -112,6 +120,8 @@ ${languageRule}`;
 
     let liveSession: any = null;
     let closed = false;
+    let attemptCounter = 0;
+    let establishedAttempt = -1;
 
     clientWs.on("close", () => {
       closed = true;
@@ -175,6 +185,7 @@ ${languageRule}`;
     /** Resolves on open, rejects on timeout or on an immediate server close. */
     const connectWithTimeout = (model: string) =>
       new Promise<any>((resolve, reject) => {
+        const attemptId = ++attemptCounter;
         let settled = false;
         const timer = setTimeout(() => {
           if (!settled) {
@@ -202,6 +213,12 @@ ${languageRule}`;
               // Without these two the Live Transcript pane has nothing to show.
               inputAudioTranscription: {},
               outputAudioTranscription: {},
+              // Without compression a Live session is terminated outright once
+              // its context window fills. Spoken audio consumes tokens quickly,
+              // so sessions were dying after a turn or two and the user had to
+              // hit "Reconnect Session" to ask anything else. A sliding window
+              // discards the oldest turns instead of ending the conversation.
+              contextWindowCompression: { slidingWindow: {} },
               systemInstruction,
             },
             callbacks: {
@@ -211,12 +228,26 @@ ${languageRule}`;
                 finish(() =>
                   reject(new Error(evt?.reason || `${model} closed the session`))
                 );
-                if (!closed) {
+                console.warn(
+                  `Gemini Live session closed (code=${evt?.code ?? "?"}) reason=${evt?.reason || "(none given)"}`
+                );
+                // Only the session we actually settled on should tear down the
+                // browser connection; a rejected model candidate must not.
+                if (!closed && attemptId === establishedAttempt) {
                   sendToClient({
                     type: "status",
                     status: "disconnected",
-                    message: "Live session ended.",
+                    message: "Voice session ended — reconnecting...",
                   });
+                  // Previously the browser socket was left open here, so the UI
+                  // still claimed to be listening over a session that no longer
+                  // existed and only a manual "Reconnect Session" recovered.
+                  // Closing it hands over to the client's automatic retry.
+                  try {
+                    clientWs.close(4001, "live-session-ended");
+                  } catch {
+                    /* already closing */
+                  }
                 }
               },
               onerror: (err: any) => {
@@ -244,6 +275,7 @@ ${languageRule}`;
         if (closed) return;
         try {
           liveSession = await connectWithTimeout(model);
+          establishedAttempt = attemptCounter;
           console.log(`Gemini Live connected using model ${model}`);
           break;
         } catch (err: any) {

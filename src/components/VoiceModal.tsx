@@ -314,7 +314,9 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
         reconnectAttemptsRef.current = 0;
       }
       setIsConnecting(true);
-      setStatusMessage("Connecting to Gemini Live API...");
+      if (!isRetry) {
+        setStatusMessage("Connecting to Gemini Live API...");
+      }
 
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const wsUrl = `${protocol}//${window.location.host}/api/live-voice?workspaceId=${encodeURIComponent(
@@ -402,9 +404,14 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
         isAiSpeakingRef.current = false;
 
         const attempt = reconnectAttemptsRef.current++;
-        const retryDelay = Math.min(1000 * 2 ** attempt, 10000);
+        // The first retry is near-instant so a session that ends mid-conversation
+        // feels like a brief pause rather than a dropped call. Later attempts
+        // back off, so a genuine outage does not hammer the server.
+        const retryDelay = attempt === 0 ? 250 : Math.min(1000 * 2 ** attempt, 10000);
         setStatusMessage(
-          `Voice connection interrupted — reconnecting in ${Math.ceil(retryDelay / 1000)}s...`
+          attempt === 0
+            ? "Reconnecting — keep talking, your microphone is still on..."
+            : `Voice connection interrupted — reconnecting in ${Math.ceil(retryDelay / 1000)}s...`
         );
         reconnectTimerRef.current = setTimeout(() => {
           reconnectTimerRef.current = null;
