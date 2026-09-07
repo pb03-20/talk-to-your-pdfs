@@ -3,25 +3,97 @@ import { IncomingMessage } from "http";
 import { getGeminiClient } from "./geminiClient.js";
 import { Modality, LiveServerMessage } from "@google/genai";
 import { workspaceStore } from "./workspaceStore.js";
+import { DocumentChunk } from "./types.js";
+
+/**
+ * Live-capable models, most preferred first. The previously hard-coded
+ * "gemini-2.0-flash-live-preview-04-09" has been retired: connecting to it
+ * never resolves and never rejects, so the browser sat on "Connecting..."
+ * forever with nothing in the logs.
+ */
+const LIVE_MODEL_CANDIDATES = [
+  "gemini-2.5-flash-native-audio-latest",
+  "gemini-2.5-flash-native-audio-preview-09-2025",
+  "gemini-3.1-flash-live-preview",
+];
+
+/** A hung Live handshake must fail loudly rather than hang the client. */
+const CONNECT_TIMEOUT_MS = 12000;
+
+/** Rough character budget for document context handed to the voice session. */
+const CONTEXT_CHAR_BUDGET = 30000;
+
+const LANGUAGE_CODES: Record<string, string> = {
+  English: "en-US",
+  Hindi: "hi-IN",
+  Bengali: "bn-IN",
+  Tamil: "ta-IN",
+  Telugu: "te-IN",
+  Marathi: "mr-IN",
+};
+
+/**
+ * Builds document context for the voice session. The previous version took the
+ * first 15 chunks truncated to 300 characters, which meant the assistant only
+ * ever "knew" the opening page or two of the first PDF uploaded.
+ */
+function buildDocumentContext(chunks: DocumentChunk[]): string {
+  if (chunks.length === 0) return "";
+
+  // Spread the budget evenly across chunks so later pages and later documents
+  // are represented too, instead of only the head of the index.
+  const perChunk = Math.max(
+    300,
+    Math.floor(CONTEXT_CHAR_BUDGET / Math.min(chunks.length, 120))
+  );
+  const selected =
+    chunks.length <= 120
+      ? chunks
+      : chunks.filter((_, i) => i % Math.ceil(chunks.length / 120) === 0);
+
+  const sections: string[] = [];
+  let used = 0;
+  for (const c of selected) {
+    const text = c.text.slice(0, perChunk);
+    if (used + text.length > CONTEXT_CHAR_BUDGET) break;
+    used += text.length;
+    sections.push(`[${c.filename}, Page ${c.pageNumber}]: ${text}`);
+  }
+  return sections.join("\n\n");
+}
 
 export function setupLiveVoiceWebSocket(wss: WebSocketServer) {
   wss.on("connection", async (clientWs: WebSocket, req: IncomingMessage) => {
     const urlObj = new URL(req.url || "/", "http://localhost:3000");
     const workspaceId = urlObj.searchParams.get("workspaceId") || "default";
+    const responseLanguage = urlObj.searchParams.get("responseLanguage") || "auto";
+
+    const sendToClient = (payload: Record<string, unknown>) => {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify(payload));
+      }
+    };
 
     // Gather context from workspace documents
     const docs = workspaceStore.getDocuments(workspaceId);
     const chunks = workspaceStore.getChunks(workspaceId);
 
-    let docContextSummary = "";
+    let docContextSummary: string;
     if (docs.length > 0) {
-      docContextSummary = `Uploaded Documents in this workspace:\n` +
+      docContextSummary =
+        `Uploaded Documents in this workspace:\n` +
         docs.map((d) => `- ${d.filename} (${d.totalPages} pages)`).join("\n") +
-        `\n\nKey excerpts from documents:\n` +
-        chunks.slice(0, 15).map((c) => `[${c.filename}, Page ${c.pageNumber}]: ${c.text.slice(0, 300)}`).join("\n\n");
+        `\n\nExcerpts from those documents:\n` +
+        buildDocumentContext(chunks);
     } else {
-      docContextSummary = "No documents have been uploaded to this workspace yet. Inform the user to upload PDFs.";
+      docContextSummary =
+        "No documents have been uploaded to this workspace yet. Inform the user to upload PDFs.";
     }
+
+    const languageRule =
+      responseLanguage && responseLanguage !== "auto"
+        ? `5. Always reply in ${responseLanguage}, regardless of the language the user speaks in.`
+        : `5. Reply in whichever language the user speaks to you in.`;
 
     const systemInstruction = `You are the real-time voice assistant for "Talk to Your PDFs".
 You are conversing with the user via live voice. Keep answers spoken, clear, conversational, and direct.
@@ -33,127 +105,203 @@ RULES:
 1. Ground your answers in the user's uploaded PDFs when applicable.
 2. If asked about facts found in the documents, mention the document name and page number.
 3. If the requested information is not in the PDFs, explicitly tell the user: "I couldn't find that in your uploaded PDFs." Do NOT make up facts.
-4. Keep spoken responses concise and easy to listen to (avoid huge lists; give summaries with key page references).`;
+4. Keep spoken responses concise and easy to listen to (avoid huge lists; give summaries with key page references).
+${languageRule}`;
+
+    const languageCode = LANGUAGE_CODES[responseLanguage];
 
     let liveSession: any = null;
+    let closed = false;
 
-    try {
-      const ai = getGeminiClient();
-      clientWs.send(JSON.stringify({ type: "status", status: "connecting", message: "Connecting to Gemini Live API..." }));
+    clientWs.on("close", () => {
+      closed = true;
+      try {
+        if (liveSession && typeof liveSession.close === "function") {
+          liveSession.close();
+        }
+      } catch {
+        // ignore cleanup errors
+      }
+    });
 
-      liveSession = await ai.live.connect({
-        model: "gemini-2.0-flash-live-preview-04-09",
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: "Zephyr" },
+    const handleLiveMessage = (message: LiveServerMessage) => {
+      try {
+        const serverContent = message.serverContent as any;
+
+        const parts = serverContent?.modelTurn?.parts;
+        if (parts && parts.length > 0) {
+          for (const part of parts) {
+            if (part.inlineData?.data) {
+              sendToClient({ type: "audio", audio: part.inlineData.data });
+            }
+            // Native-audio models put their private reasoning in `part.text`
+            // with `thought: true`. Forwarding it dumped raw chain-of-thought
+            // into the transcript pane; the spoken words arrive separately on
+            // `outputTranscription` below.
+            if (part.text && !part.thought) {
+              sendToClient({ type: "outputTranscript", text: part.text });
+            }
+          }
+        }
+
+        // Transcriptions arrive on `inputTranscription` / `outputTranscription`.
+        // The old code read `inputTranscript`, a field that does not exist, so
+        // the transcript pane never received anything from Gemini at all.
+        if (serverContent?.inputTranscription?.text) {
+          sendToClient({
+            type: "inputTranscript",
+            text: serverContent.inputTranscription.text,
+          });
+        }
+        if (serverContent?.outputTranscription?.text) {
+          sendToClient({
+            type: "outputTranscript",
+            text: serverContent.outputTranscription.text,
+          });
+        }
+
+        if (serverContent?.turnComplete) {
+          sendToClient({ type: "turnComplete" });
+        }
+
+        if (serverContent?.interrupted) {
+          sendToClient({ type: "interrupted" });
+        }
+      } catch (err) {
+        console.error("Error processing Live API message:", err);
+      }
+    };
+
+    /** Resolves on open, rejects on timeout or on an immediate server close. */
+    const connectWithTimeout = (model: string) =>
+      new Promise<any>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            reject(new Error(`Timed out connecting to ${model}`));
+          }
+        }, CONNECT_TIMEOUT_MS);
+
+        const finish = (fn: () => void) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          fn();
+        };
+
+        getGeminiClient()
+          .live.connect({
+            model,
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
+                ...(languageCode ? { languageCode } : {}),
+              },
+              // Without these two the Live Transcript pane has nothing to show.
+              inputAudioTranscription: {},
+              outputAudioTranscription: {},
+              systemInstruction,
             },
-          },
-          systemInstruction,
-        },
-        callbacks: {
-          onmessage: (message: LiveServerMessage) => {
-            try {
-              // Check for model output audio / text
-              const parts = message.serverContent?.modelTurn?.parts;
-              if (parts && parts.length > 0) {
-                for (const part of parts) {
-                  if (part.inlineData?.data) {
-                    clientWs.send(JSON.stringify({
-                      type: "audio",
-                      audio: part.inlineData.data,
-                    }));
-                  }
-                  if (part.text) {
-                    clientWs.send(JSON.stringify({
-                      type: "outputTranscript",
-                      text: part.text,
-                    }));
-                  }
+            callbacks: {
+              onmessage: handleLiveMessage,
+              onclose: (evt: any) => {
+                // A rejected model closes the socket instead of throwing.
+                finish(() =>
+                  reject(new Error(evt?.reason || `${model} closed the session`))
+                );
+                if (!closed) {
+                  sendToClient({
+                    type: "status",
+                    status: "disconnected",
+                    message: "Live session ended.",
+                  });
                 }
-              }
-
-              // Forward user speech transcript (Gemini transcribes the user's audio)
-              const inputTranscript = (message as any).serverContent?.inputTranscript;
-              if (inputTranscript?.text) {
-                clientWs.send(JSON.stringify({
-                  type: "inputTranscript",
-                  text: inputTranscript.text,
-                }));
-              }
-
-              // Turn complete — tell client mic can resume
-              if (message.serverContent?.turnComplete) {
-                clientWs.send(JSON.stringify({ type: "turnComplete" }));
-              }
-
-              // Check for interruption (user spoke while AI was talking)
-              if (message.serverContent?.interrupted) {
-                clientWs.send(JSON.stringify({ type: "interrupted" }));
-              }
-            } catch (err) {
-              console.error("Error processing Live API message:", err);
-            }
-          },
-          onclose: () => {
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ type: "status", status: "disconnected", message: "Live session ended." }));
-            }
-          },
-          onerror: (err: any) => {
-            console.error("Live API session error:", err);
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ type: "error", message: err?.message || "Live API error" }));
-            }
-          },
-        },
+              },
+              onerror: (err: any) => {
+                finish(() => reject(new Error(err?.message || `${model} error`)));
+                sendToClient({
+                  type: "error",
+                  message: err?.message || "Live API error",
+                });
+              },
+            },
+          })
+          .then((session) => finish(() => resolve(session)))
+          .catch((err) => finish(() => reject(err)));
       });
 
-      clientWs.send(JSON.stringify({ type: "status", status: "ready", message: "Gemini Live connected and ready for speech." }));
+    try {
+      sendToClient({
+        type: "status",
+        status: "connecting",
+        message: "Connecting to Gemini Live API...",
+      });
 
-      // Handle messages from client
+      const failures: string[] = [];
+      for (const model of LIVE_MODEL_CANDIDATES) {
+        if (closed) return;
+        try {
+          liveSession = await connectWithTimeout(model);
+          console.log(`Gemini Live connected using model ${model}`);
+          break;
+        } catch (err: any) {
+          const reason = err?.message || String(err);
+          failures.push(`${model}: ${reason}`);
+          console.warn(`Gemini Live model ${model} unavailable — ${reason}`);
+        }
+      }
+
+      if (!liveSession) {
+        throw new Error(
+          !process.env.GEMINI_API_KEY
+            ? "GEMINI_API_KEY is not set on the server. Add it to your .env file and restart."
+            : `No Gemini Live model accepted the connection. ${failures.join(" | ")}`
+        );
+      }
+
+      if (closed) {
+        try {
+          liveSession.close();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+
+      sendToClient({
+        type: "status",
+        status: "ready",
+        message: "Gemini Live connected and ready for speech.",
+      });
+
       clientWs.on("message", (raw) => {
+        if (!liveSession) return;
         try {
           const data = JSON.parse(raw.toString());
           if (data.type === "audio" && data.audio) {
-            // Send 16kHz PCM audio chunk
             liveSession.sendRealtimeInput({
-              audio: {
-                data: data.audio,
-                mimeType: "audio/pcm;rate=16000",
-              },
+              audio: { data: data.audio, mimeType: "audio/pcm;rate=16000" },
             });
           } else if (data.type === "text" && data.text) {
-            liveSession.sendRealtimeInput({
-              text: data.text,
-            });
+            liveSession.sendRealtimeInput({ text: data.text });
           } else if (data.type === "interrupt") {
-            // User interrupted — send an empty end-of-turn to stop the AI mid-response
-            try {
-              liveSession.sendRealtimeInput({ audio: { data: "", mimeType: "audio/pcm;rate=16000" } });
-            } catch (_) { }
+            // Closing the audio stream is the documented way to cut the model
+            // off mid-response. The previous code sent a zero-length audio
+            // blob, which the Live API rejects as a malformed frame.
+            liveSession.sendRealtimeInput({ audioStreamEnd: true });
           }
         } catch (e) {
           console.error("Error sending input to Live API session:", e);
         }
       });
-
-      clientWs.on("close", () => {
-        try {
-          if (liveSession && typeof liveSession.close === "function") {
-            liveSession.close();
-          }
-        } catch (e) {
-          // ignore cleanup errors
-        }
-      });
     } catch (err: any) {
       console.error("Failed to initialize Gemini Live session:", err);
-      clientWs.send(JSON.stringify({
+      sendToClient({
         type: "error",
         message: `Could not start Gemini Live session: ${err?.message || "Check API configuration"}`,
-      }));
+      });
     }
   });
 }

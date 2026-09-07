@@ -8,7 +8,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatArea } from "./components/ChatArea";
 import { VoiceModal } from "./components/VoiceModal";
 import { CitationModal } from "./components/CitationModal";
-import { DocumentMetadata, DocumentChunk, ChatMessage, SourceCitation } from "./types";
+import { DocumentMetadata, ChatMessage, SourceCitation } from "./types";
 import { LiveAudioPlayer, speakWithBrowser } from "./lib/audioUtils";
 
 function getOrInitWorkspaceId(): string {
@@ -24,7 +24,6 @@ function getOrInitWorkspaceId(): string {
 export default function App() {
   const [workspaceId, setWorkspaceId] = useState<string>(getOrInitWorkspaceId);
   const [documents, setDocuments] = useState<DocumentMetadata[]>([]);
-  const [workspaceChunks, setWorkspaceChunks] = useState<DocumentChunk[]>([]);
   const [totalChunks, setTotalChunks] = useState<number>(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isUploading, setIsUploading] = useState<boolean>(false);
@@ -33,6 +32,7 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
   const [selectedCitation, setSelectedCitation] = useState<SourceCitation | null>(null);
   const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
+  const [loadingTtsMessageId, setLoadingTtsMessageId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   const ttsPlayerRef = useRef<LiveAudioPlayer | null>(null);
@@ -50,7 +50,6 @@ export default function App() {
         const data = await res.json();
         setDocuments(data.documents || []);
         setTotalChunks(data.totalChunks || 0);
-        if (data.chunks) setWorkspaceChunks(data.chunks);
         setMessages(data.messages || []);
       }
     } catch (err) {
@@ -152,11 +151,6 @@ export default function App() {
         throw new Error("Failed to load sample document");
       }
 
-      const data = await res.json();
-      if (data.documents) setDocuments(data.documents);
-      if (data.chunks) setWorkspaceChunks(data.chunks);
-      if (data.totalChunks) setTotalChunks(data.totalChunks);
-
       await loadWorkspace(workspaceId);
     } catch (err: any) {
       console.error("Sample document loading error:", err);
@@ -170,12 +164,10 @@ export default function App() {
   const handleDeleteDocument = async (docId: string) => {
     // 1. Optimistic removal from UI immediately
     const prevDocs = documents;
-    const prevChunks = workspaceChunks;
     const prevTotal = totalChunks;
 
     const targetDoc = prevDocs.find((d) => d.id === docId);
     setDocuments((prev) => prev.filter((d) => d.id !== docId));
-    setWorkspaceChunks((prev) => prev.filter((c) => c.docId !== docId));
     setTotalChunks((prev) => Math.max(0, prev - (targetDoc?.totalChunks || 0)));
     setUploadError(null);
 
@@ -198,7 +190,6 @@ export default function App() {
       console.error("Failed to delete document:", err);
       // Rollback on network failure
       setDocuments(prevDocs);
-      setWorkspaceChunks(prevChunks);
       setTotalChunks(prevTotal);
       alert("Failed to delete document from server. Please try again.");
     }
@@ -210,20 +201,29 @@ export default function App() {
       return;
     }
 
+    const oldId = workspaceId;
     const newId = `ws_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     localStorage.setItem("pdf_rag_workspace_id", newId);
-    setWorkspaceId(newId);
     setDocuments([]);
-    setWorkspaceChunks([]);
     setTotalChunks(0);
-    setMessages([
-      {
-        id: "new-ws-msg",
-        role: "model",
-        content: "Workspace reset. You have a fresh, isolated workspace. Upload PDFs in the sidebar to start asking questions or click 'Load Sample PDF'.",
-        timestamp: new Date().toISOString(),
-      },
-    ]);
+    setMessages([]);
+    handleStopTTS();
+
+    // The old workspace kept its documents and embeddings on the server
+    // forever; ask the server to drop them before switching identities.
+    try {
+      await fetch("/api/workspace/reset", {
+        method: "POST",
+        headers: { "x-workspace-id": oldId },
+      });
+    } catch (err) {
+      console.error("Failed to clear the previous workspace on the server:", err);
+    }
+
+    // Changing the id triggers loadWorkspace, which supplies the greeting for
+    // the fresh workspace. Setting a placeholder here would only flash and
+    // then be overwritten by that fetch.
+    setWorkspaceId(newId);
   };
 
   // Clear chat history only
@@ -292,15 +292,28 @@ export default function App() {
   };
 
   // TTS Read Aloud
-  const handlePlayTTS = async (text: string) => {
+  const handlePlayTTS = async (text: string, messageId: string) => {
     const requestId = ++ttsRequestIdRef.current; // invalidate any older in-flight request
 
     if (ttsPlayerRef.current) {
-      ttsPlayerRef.current.stop();
+      ttsPlayerRef.current.dispose();
+      ttsPlayerRef.current = null;
     }
-    ttsPlayerRef.current = new LiveAudioPlayer(); // fresh player, resets nextStartTime to 0
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
 
-    setPlayingMessageId("loading");
+    setPlayingMessageId(null);
+    setLoadingTtsMessageId(messageId);
+
+    const finish = () => {
+      // Only the newest request may clear the indicator, otherwise a stale
+      // response could switch off audio that has already been replaced.
+      if (requestId === ttsRequestIdRef.current) {
+        setPlayingMessageId(null);
+        setLoadingTtsMessageId(null);
+      }
+    };
 
     try {
       const res = await fetch("/api/tts", {
@@ -309,35 +322,69 @@ export default function App() {
         body: JSON.stringify({ text }),
       });
 
-      if (requestId !== ttsRequestIdRef.current) return; // a newer tap superseded this one — drop it
+      if (requestId !== ttsRequestIdRef.current) return; // a newer tap superseded this one
 
       if (res.ok) {
         const data = await res.json();
         if (data.audio) {
-          ttsPlayerRef.current.playChunk(data.audio);
-          setPlayingMessageId("playing");
+          const player = new LiveAudioPlayer();
+          // Without this the button stayed on "Stop" until the next click,
+          // because nothing ever reported that playback had finished.
+          player.onPlaybackComplete = finish;
+          ttsPlayerRef.current = player;
+
+          // Mark it playing *before* starting: if decoding fails the player
+          // completes synchronously, and setting state afterwards would
+          // re-light the "Stop" button with no audio behind it.
+          setLoadingTtsMessageId(null);
+          setPlayingMessageId(messageId);
+          player.playChunk(data.audio);
+          player.signalTurnComplete();
           return;
         }
       }
-      // Browser fallback if server TTS unavailable
-      speakWithBrowser(text, () => setPlayingMessageId(null));
-      setPlayingMessageId("playing");
+
+      // Browser fallback if server TTS is unavailable
+      setLoadingTtsMessageId(null);
+      if (speakWithBrowser(text, finish)) {
+        setPlayingMessageId(messageId);
+      } else {
+        finish();
+      }
     } catch (e) {
       if (requestId !== ttsRequestIdRef.current) return;
-      speakWithBrowser(text, () => setPlayingMessageId(null));
-      setPlayingMessageId("playing");
+      console.error("TTS error:", e);
+      setLoadingTtsMessageId(null);
+      if (speakWithBrowser(text, finish)) {
+        setPlayingMessageId(messageId);
+      } else {
+        finish();
+      }
     }
   };
 
   const handleStopTTS = () => {
+    ttsRequestIdRef.current++; // cancel any in-flight request
     if (ttsPlayerRef.current) {
-      ttsPlayerRef.current.stop();
+      ttsPlayerRef.current.dispose();
+      ttsPlayerRef.current = null;
     }
     if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
     setPlayingMessageId(null);
+    setLoadingTtsMessageId(null);
   };
+
+  // Release the audio context if the app unmounts mid-playback.
+  useEffect(() => {
+    return () => {
+      ttsPlayerRef.current?.dispose();
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
 
   return (
     <div className="h-screen w-full flex flex-col bg-white overflow-hidden text-zinc-900 font-sans antialiased">
@@ -379,6 +426,7 @@ export default function App() {
           onSelectCitation={(cit) => setSelectedCitation(cit)}
           onPlayTTS={handlePlayTTS}
           playingMessageId={playingMessageId}
+          loadingTtsMessageId={loadingTtsMessageId}
           onStopTTS={handleStopTTS}
         />
       </div>

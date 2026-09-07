@@ -13,9 +13,10 @@ import {
   FileText,
   Copy,
   Check,
-  RotateCcw,
+  Loader2,
 } from "lucide-react";
 import { ChatMessage, SourceCitation } from "../types";
+import { Markdown } from "../lib/markdown";
 
 interface ChatAreaProps {
   messages: ChatMessage[];
@@ -24,8 +25,9 @@ interface ChatAreaProps {
   onOpenVoice: () => void;
   hasDocuments: boolean;
   onSelectCitation?: (citation: SourceCitation) => void;
-  onPlayTTS?: (text: string) => void;
+  onPlayTTS?: (text: string, messageId: string) => void;
   playingMessageId?: string | null;
+  loadingTtsMessageId?: string | null;
   onStopTTS?: () => void;
 }
 
@@ -38,6 +40,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onSelectCitation,
   onPlayTTS,
   playingMessageId,
+  loadingTtsMessageId,
   onStopTTS,
 }) => {
   const [inputText, setInputText] = useState("");
@@ -53,6 +56,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   useEffect(() => {
     scrollToBottom();
   }, [messages, isLoading]);
+
+  // Grow the composer with its content instead of trapping long questions in
+  // a one-line box. While empty it keeps no inline height at all, so the
+  // stylesheet owns the resting size even if this runs before CSS is applied.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    if (!inputText) {
+      el.style.height = "";
+      return;
+    }
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 144)}px`;
+  }, [inputText]);
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -75,10 +92,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }));
   };
 
-  const handleCopy = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
+  const handleCopy = async (text: string, id: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch (err) {
+      // Clipboard access is blocked outside secure contexts and in some iframes.
+      console.error("Copy failed:", err);
+    }
   };
 
   const sampleQuestions = [
@@ -106,6 +128,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           messages.map((msg) => {
             const isUser = msg.role === "user";
             const isPlaying = playingMessageId === msg.id;
+            const isTtsLoading = loadingTtsMessageId === msg.id;
 
             return (
               <div
@@ -136,7 +159,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     }`}
                   >
                     {/* Message content */}
-                    <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+                    {isUser ? (
+                      <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+                    ) : (
+                      <Markdown text={msg.content} />
+                    )}
 
                     {/* AI Message Action bar */}
                     {!isUser && (
@@ -144,15 +171,30 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         <div className="flex items-center space-x-2">
                           {onPlayTTS && (
                             <button
-                              onClick={() => (isPlaying ? onStopTTS?.() : onPlayTTS(msg.content))}
+                              onClick={() =>
+                                isPlaying || isTtsLoading
+                                  ? onStopTTS?.()
+                                  : onPlayTTS(msg.content, msg.id)
+                              }
                               className={`flex items-center space-x-1 px-2 py-1 rounded-md text-xs transition-colors ${
-                                isPlaying
+                                isPlaying || isTtsLoading
                                   ? "bg-rose-50 text-rose-600 font-medium"
                                   : "hover:bg-zinc-100 text-zinc-600"
                               }`}
-                              title={isPlaying ? "Stop audio" : "Listen to answer"}
+                              title={
+                                isTtsLoading
+                                  ? "Cancel audio generation"
+                                  : isPlaying
+                                    ? "Stop audio"
+                                    : "Listen to answer"
+                              }
                             >
-                              {isPlaying ? (
+                              {isTtsLoading ? (
+                                <>
+                                  <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+                                  <span>Preparing...</span>
+                                </>
+                              ) : isPlaying ? (
                                 <>
                                   <VolumeX className="w-3.5 h-3.5 mr-1" />
                                   <span>Stop</span>
@@ -272,8 +314,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             {sampleQuestions.map((q, idx) => (
               <button
                 key={idx}
-                onClick={() => onSendMessage(q)}
-                className="text-xs text-zinc-700 bg-white hover:bg-zinc-100 hover:text-zinc-900 border border-zinc-200 rounded-lg px-2.5 py-1.5 transition-colors text-left shadow-2xs"
+                type="button"
+                disabled={isLoading}
+                onClick={() => !isLoading && onSendMessage(q)}
+                className="text-xs text-zinc-700 bg-white hover:bg-zinc-100 hover:text-zinc-900 border border-zinc-200 rounded-lg px-2.5 py-1.5 transition-colors text-left shadow-2xs disabled:opacity-50"
               >
                 {q}
               </button>
