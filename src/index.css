@@ -1,1 +1,245 @@
 @import "tailwindcss";
+
+/*
+ * Design tokens.
+ *
+ * Every colour in the UI resolves through these variables, so light and dark
+ * are defined in exactly one place. `@theme inline` makes Tailwind emit
+ * utilities that reference the variable rather than baking in a fixed value,
+ * which is what lets `bg-surface` follow the active theme with no `dark:`
+ * variant on any component.
+ */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-sunken: var(--sunken);
+
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
+
+  --color-positive: var(--positive);
+  --color-positive-bg: var(--positive-bg);
+  --color-caution: var(--caution);
+  --color-caution-bg: var(--caution-bg);
+  --color-critical: var(--critical);
+  --color-critical-bg: var(--critical-bg);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono",
+    Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+/* Light — the default. */
+:root {
+  --canvas: #f7f7f8;
+  --surface: #ffffff;
+  --raised: #ffffff;
+  --sunken: #f1f1f3;
+
+  --line: #e6e6e9;
+  --line-strong: #d3d3d8;
+
+  --ink: #18181b;
+  --ink-2: #55555f;
+  --ink-3: #8e8e99;
+
+  --accent: #18181b;
+  --accent-hover: #303036;
+  --accent-ink: #ffffff;
+
+  --positive: #067a54;
+  --positive-bg: #e7f6f0;
+  --caution: #9a6300;
+  --caution-bg: #fdf3e2;
+  --critical: #c02525;
+  --critical-bg: #fdeceb;
+
+  --ring: color-mix(in srgb, var(--ink) 28%, transparent);
+  --shadow-color: 220 12% 20%;
+
+  color-scheme: light;
+}
+
+/*
+ * Dark. Applied when the OS asks for it, unless the user has explicitly
+ * chosen light, and always when they have explicitly chosen dark.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --canvas: #0a0a0b;
+    --surface: #141416;
+    --raised: #1a1a1d;
+    --sunken: #101012;
+
+    --line: #26262b;
+    --line-strong: #3a3a41;
+
+    --ink: #f4f4f5;
+    --ink-2: #a5a5b0;
+    --ink-3: #71717d;
+
+    --accent: #f4f4f5;
+    --accent-hover: #e0e0e3;
+    --accent-ink: #131316;
+
+    --positive: #3ddc9a;
+    --positive-bg: #10241d;
+    --caution: #f0b45e;
+    --caution-bg: #2a1f0e;
+    --critical: #ff8080;
+    --critical-bg: #2c1416;
+
+    --ring: color-mix(in srgb, var(--ink) 40%, transparent);
+    --shadow-color: 0 0% 0%;
+
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --canvas: #0a0a0b;
+  --surface: #141416;
+  --raised: #1a1a1d;
+  --sunken: #101012;
+
+  --line: #26262b;
+  --line-strong: #3a3a41;
+
+  --ink: #f4f4f5;
+  --ink-2: #a5a5b0;
+  --ink-3: #71717d;
+
+  --accent: #f4f4f5;
+  --accent-hover: #e0e0e3;
+  --accent-ink: #131316;
+
+  --positive: #3ddc9a;
+  --positive-bg: #10241d;
+  --caution: #f0b45e;
+  --caution-bg: #2a1f0e;
+  --critical: #ff8080;
+  --critical-bg: #2c1416;
+
+  --ring: color-mix(in srgb, var(--ink) 40%, transparent);
+  --shadow-color: 0 0% 0%;
+
+  color-scheme: dark;
+}
+
+/* Base */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/*
+ * No blanket colour transition.
+ *
+ * Transitioning `background-color` on every element made theme switching
+ * repaint the entire tree at once, which left surfaces and text visibly
+ * out of step mid-swap. Components opt into `transition-colors` individually
+ * where it actually helps (hover states), and the theme swap is instant.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+::selection {
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+/* A single, consistent focus treatment for keyboard users. */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Slim scrollbars that read as part of the surface rather than the OS. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--line-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--ink-3);
+  background-clip: content-box;
+}
+
+/* Utilities used across components. */
+@utility shadow-soft {
+  box-shadow: 0 1px 2px hsl(var(--shadow-color) / 0.05),
+    0 1px 3px hsl(var(--shadow-color) / 0.04);
+}
+
+@utility shadow-lifted {
+  box-shadow: 0 1px 2px hsl(var(--shadow-color) / 0.06),
+    0 8px 24px -8px hsl(var(--shadow-color) / 0.14);
+}
+
+@utility shadow-overlay {
+  box-shadow: 0 24px 60px -12px hsl(var(--shadow-color) / 0.32),
+    0 0 0 1px var(--line);
+}
+
+/* Typing indicator */
+@keyframes dot-pulse {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+
+.dot-flash {
+  animation: dot-pulse 1.25s infinite ease-in-out;
+}
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.rise-in {
+  animation: rise-in 220ms ease-out both;
+}

@@ -32,14 +32,14 @@ function renderInline(text: string, { key }: InlineKey): React.ReactNode[] {
       nodes.push(
         <code
           key={id}
-          className="px-1 py-0.5 rounded bg-zinc-100 text-zinc-800 font-mono text-[0.9em]"
+          className="px-1 py-0.5 rounded bg-sunken text-ink font-mono text-[0.88em]"
         >
           {token.slice(1, -1)}
         </code>
       );
     } else if (token.startsWith("**")) {
       nodes.push(
-        <strong key={id} className="font-semibold text-zinc-900">
+        <strong key={id} className="font-semibold text-ink">
           {token.slice(2, -2)}
         </strong>
       );
@@ -60,10 +60,10 @@ function renderInline(text: string, { key }: InlineKey): React.ReactNode[] {
 }
 
 const HEADING_SIZES: Record<number, string> = {
-  1: "text-base font-semibold",
-  2: "text-sm font-semibold",
-  3: "text-sm font-semibold",
-  4: "text-xs font-semibold uppercase tracking-wide",
+  1: "text-[16px] font-semibold tracking-[-0.011em] mt-1",
+  2: "text-[15px] font-semibold tracking-[-0.008em] mt-1",
+  3: "text-[14px] font-semibold",
+  4: "text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-2",
 };
 
 export const Markdown: React.FC<{ text: string }> = ({ text }) => {
@@ -126,7 +126,7 @@ export const Markdown: React.FC<{ text: string }> = ({ text }) => {
         blocks.push(
           <pre
             key={`c${blockIndex++}`}
-            className="bg-zinc-900 text-zinc-100 rounded-lg p-3 overflow-x-auto text-[0.85em] font-mono"
+            className="bg-sunken border border-line text-ink rounded-xl p-3 overflow-x-auto text-[0.85em] font-mono"
           >
             <code>{codeLines.join("\n")}</code>
           </pre>
@@ -145,13 +145,21 @@ export const Markdown: React.FC<{ text: string }> = ({ text }) => {
       continue;
     }
 
+    // Thematic break. Without this, models emitting `---` between sections
+    // had it rendered as literal dashes in the middle of the answer.
+    if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      flushAll();
+      blocks.push(<hr key={`hr${blockIndex++}`} className="border-line my-1" />);
+      continue;
+    }
+
     const heading = /^(#{1,4})\s+(.*)$/.exec(line);
     if (heading) {
       flushAll();
       const level = heading[1].length;
       const key = `h${blockIndex++}`;
       blocks.push(
-        <p key={key} className={`${HEADING_SIZES[level]} text-zinc-900`}>
+        <p key={key} className={`${HEADING_SIZES[level]} text-ink`}>
           {renderInline(heading[2], { key })}
         </p>
       );
@@ -185,7 +193,7 @@ export const Markdown: React.FC<{ text: string }> = ({ text }) => {
     blocks.push(
       <pre
         key={`c${blockIndex++}`}
-        className="bg-zinc-900 text-zinc-100 rounded-lg p-3 overflow-x-auto text-[0.85em] font-mono"
+        className="bg-sunken border border-line text-ink rounded-xl p-3 overflow-x-auto text-[0.85em] font-mono"
       >
         <code>{codeLines.join("\n")}</code>
       </pre>

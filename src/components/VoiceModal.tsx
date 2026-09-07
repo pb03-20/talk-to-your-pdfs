@@ -4,7 +4,6 @@ import {
   MicOff,
   X,
   Volume2,
-  Radio,
   RotateCcw,
   AlertCircle,
   Square,
@@ -494,39 +493,55 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
 
   if (!isOpen) return null;
 
+  const statusLabel = isAiSpeaking
+    ? "Speaking"
+    : isMuted
+      ? "Muted"
+      : isConnected
+        ? "Listening"
+        : "Connecting";
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-[3px]"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Live voice conversation"
+    >
       <div
         id="modal-voice-live"
-        className="bg-white border border-zinc-200 rounded-3xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col h-[640px] max-h-[90vh]"
+        className="bg-surface rounded-2xl w-full max-w-lg shadow-overlay overflow-hidden flex flex-col h-[620px] max-h-[92vh] rise-in"
       >
         {/* Header */}
-        <div className="px-6 py-4 border-b border-zinc-200 flex items-center justify-between gap-3 bg-zinc-50/50">
-          <div className="flex items-center space-x-2.5 min-w-0">
-            <div className="w-8 h-8 rounded-xl bg-zinc-900 text-white flex items-center justify-center shrink-0">
-              <Radio className={`w-4 h-4 ${isConnected ? "animate-pulse text-emerald-400" : ""}`} />
-            </div>
+        <div className="h-14 shrink-0 px-4 flex items-center justify-between gap-3 border-b border-line">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span
+              className={`w-2 h-2 rounded-full shrink-0 ${
+                isAiSpeaking
+                  ? "bg-ink"
+                  : isConnected
+                    ? "bg-positive"
+                    : "bg-ink-3"
+              } ${isConnected && !isAiSpeaking ? "animate-pulse" : ""}`}
+              aria-hidden="true"
+            />
             <div className="min-w-0">
-              <h3 className="text-sm font-semibold text-zinc-900 flex items-center space-x-2">
-                <span>Gemini Live Voice</span>
-                <span
-                  className={`w-2 h-2 rounded-full ${isConnected ? "bg-emerald-500 animate-ping" : "bg-zinc-300"
-                    }`}
-                />
-              </h3>
-              <p className="text-[11px] text-zinc-500 truncate">
-                Grounding against {documentsCount} uploaded PDF{documentsCount === 1 ? "" : "s"}
+              <h3 className="text-[13px] font-semibold text-ink leading-tight">Live voice</h3>
+              <p className="text-[11px] text-ink-3 leading-tight truncate">
+                {documentsCount === 0
+                  ? "No documents loaded"
+                  : `Grounded on ${documentsCount} document${documentsCount === 1 ? "" : "s"}`}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center space-x-1.5 shrink-0">
-            <label className="hidden sm:flex items-center gap-1.5 text-[10px] text-zinc-500">
-              <span>Reply in</span>
+          <div className="flex items-center gap-1 shrink-0">
+            <label className="hidden sm:flex items-center gap-1.5 text-[11px] text-ink-3">
+              <span className="sr-only">Reply language</span>
               <select
                 value={responseLanguage}
                 onChange={(event) => handleLanguageChange(event.target.value)}
-                className="bg-white border border-zinc-200 rounded-lg px-1.5 py-1 text-zinc-700 outline-none"
+                className="bg-surface border border-line rounded-lg px-2 py-1 text-[11.5px] text-ink-2 hover:border-line-strong outline-none transition-colors cursor-pointer"
                 title="Choose Auto to match the language you speak"
               >
                 <option value="auto">Auto</option>
@@ -544,120 +559,98 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
               href={window.location.href}
               target="_blank"
               rel="noopener noreferrer"
-              title="Open app in a new browser tab for full microphone permissions"
-              className="p-2 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 rounded-xl transition-colors flex items-center"
+              title="Open in a new tab for full microphone permissions"
+              aria-label="Open in a new tab"
+              className="p-2 text-ink-3 hover:text-ink hover:bg-sunken rounded-lg transition-colors"
             >
               <ExternalLink className="w-4 h-4" />
             </a>
             <button
               id="btn-close-voice-modal"
               onClick={onClose}
-              className="p-2 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 rounded-xl transition-colors"
+              aria-label="Close voice conversation"
+              className="p-2 text-ink-3 hover:text-ink hover:bg-sunken rounded-lg transition-colors"
             >
-              <X className="w-5 h-5" />
+              <X className="w-4 h-4" />
             </button>
           </div>
         </div>
 
-        {/* Live Audio Visualizer / Status Area */}
-        <div className="p-6 bg-gradient-to-b from-zinc-50 to-white border-b border-zinc-100 flex flex-col items-center text-center">
-          <div className="relative w-24 h-24 my-2 flex items-center justify-center">
-            {isConnected && (
-              <>
-                <div
-                  className={`absolute inset-0 rounded-full transition-all duration-300 ${isAiSpeaking
-                      ? "bg-indigo-500/20 animate-ping"
-                      : isMuted
-                        ? "bg-zinc-200"
-                        : "bg-emerald-500/20 animate-pulse"
-                    }`}
-                />
-                <div
-                  className={`absolute inset-2 rounded-full transition-all duration-300 ${isAiSpeaking ? "bg-indigo-500/10" : "bg-emerald-500/10"
-                    }`}
-                />
-              </>
-            )}
-
-            <div
-              className={`w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-md ${isAiSpeaking
-                  ? "bg-indigo-600 text-white shadow-indigo-200"
-                  : isMuted
-                    ? "bg-zinc-200 text-zinc-500"
-                    : isConnected
-                      ? "bg-zinc-900 text-white"
-                      : "bg-zinc-100 text-zinc-400"
+        {/* Status */}
+        <div className="shrink-0 px-6 pt-7 pb-6 flex flex-col items-center text-center border-b border-line">
+          <div className="relative w-20 h-20 flex items-center justify-center">
+            {isConnected && !isMuted && (
+              <span
+                className={`absolute inset-0 rounded-full ${
+                  isAiSpeaking ? "bg-ink/10 animate-ping" : "bg-positive/15 animate-pulse"
                 }`}
+                aria-hidden="true"
+              />
+            )}
+            <div
+              className={`relative w-16 h-16 rounded-full flex items-center justify-center transition-colors ${
+                isMuted
+                  ? "bg-sunken text-ink-3"
+                  : isAiSpeaking
+                    ? "bg-accent text-accent-ink"
+                    : isConnected
+                      ? "bg-accent text-accent-ink"
+                      : "bg-sunken text-ink-3"
+              }`}
             >
               {isAiSpeaking ? (
-                <Volume2 className="w-7 h-7 animate-bounce" />
+                <Volume2 className="w-6 h-6" strokeWidth={2.1} />
               ) : isMuted ? (
-                <MicOff className="w-7 h-7" />
+                <MicOff className="w-6 h-6" strokeWidth={2.1} />
               ) : (
-                <Mic className="w-7 h-7" />
+                <Mic className="w-6 h-6" strokeWidth={2.1} />
               )}
             </div>
           </div>
 
-          <div className="mt-3">
-            <span
-              className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${isAiSpeaking
-                  ? "bg-indigo-50 text-indigo-700 border border-indigo-200/60"
-                  : isConnected
-                    ? "bg-emerald-50 text-emerald-700 border border-emerald-200/60"
-                    : "bg-zinc-100 text-zinc-600"
-                }`}
-            >
-              {isAiSpeaking
-                ? "AI Speaking — you can interrupt"
-                : isMuted
-                  ? "Microphone Muted"
-                  : isConnected
-                    ? "Two-way listening"
-                    : "Connecting..."}
-            </span>
-            <p className="text-xs text-zinc-500 mt-1 max-w-sm">{statusMessage}</p>
-            {responseLanguage === "auto" && (
-              <p className="text-[10px] text-zinc-400 mt-1">Replies follow the language you speak.</p>
-            )}
-          </div>
+          <p className="mt-4 text-[13.5px] font-medium text-ink">{statusLabel}</p>
+          <p className="mt-1 text-[12px] text-ink-3 max-w-xs leading-relaxed">{statusMessage}</p>
 
           {isPermissionDenied ? (
-            <div className="mt-4 p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-xs text-left w-full space-y-2">
-              <div className="flex items-center space-x-2 font-semibold text-amber-900">
-                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-                <span>Microphone Access Required</span>
+            <div className="mt-4 w-full rounded-xl bg-caution-bg px-3.5 py-3 text-left">
+              <div className="flex items-center gap-2 text-[12px] font-semibold text-caution">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                Microphone access required
               </div>
-              <p className="text-amber-800 leading-relaxed">
-                Browser blocked microphone permissions. If you are viewing inside an embedded preview iframe, open the app in a new tab to enable audio conversation:
+              <p className="mt-1.5 text-[11.5px] text-caution/90 leading-relaxed">
+                Your browser blocked the microphone. If this is an embedded preview, open the
+                app in its own tab to allow audio.
               </p>
-              <div className="pt-1 flex items-center space-x-2">
+              <div className="mt-2.5 flex items-center gap-2">
                 <button
                   id="btn-retry-mic-permission"
                   onClick={() => startLiveSession()}
-                  className="px-3 py-1.5 bg-amber-700 text-white font-medium rounded-lg text-xs hover:bg-amber-800 transition-colors shadow-2xs"
+                  className="px-3 py-1.5 rounded-lg bg-accent text-accent-ink text-[11.5px] font-medium hover:bg-accent-hover transition-colors"
                 >
-                  Retry Permission
+                  Retry
                 </button>
                 <a
                   id="btn-open-voice-standalone"
                   href={window.location.href}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="px-3 py-1.5 bg-white text-amber-900 border border-amber-300 font-medium rounded-lg text-xs hover:bg-amber-100 transition-colors inline-flex items-center space-x-1"
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-line bg-surface text-ink text-[11.5px] font-medium hover:border-line-strong transition-colors"
                 >
-                  <span>Open in New Tab</span>
-                  <ExternalLink className="w-3.5 h-3.5 ml-1" />
+                  New tab
+                  <ExternalLink className="w-3 h-3" />
                 </a>
               </div>
             </div>
           ) : errorMessage ? (
-            <div className="mt-3 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center space-x-2 text-left w-full">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <div className="flex-1">{errorMessage}</div>
+            <div
+              role="alert"
+              className="mt-4 w-full rounded-xl bg-critical-bg px-3.5 py-3 flex items-start gap-2 text-left"
+            >
+              <AlertCircle className="w-4 h-4 text-critical mt-px shrink-0" />
+              <p className="flex-1 text-[11.5px] text-critical leading-relaxed">{errorMessage}</p>
               <button
                 onClick={() => startLiveSession()}
-                className="px-2 py-1 bg-white text-rose-700 font-medium rounded shadow-2xs text-[11px] hover:bg-rose-100"
+                className="px-2.5 py-1 rounded-md bg-surface text-critical text-[11px] font-medium hover:bg-sunken transition-colors shrink-0"
               >
                 Retry
               </button>
@@ -665,71 +658,79 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
           ) : null}
         </div>
 
-        {/* Live Transcript Feed */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3 bg-zinc-50/40">
-          <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider mb-2 flex items-center space-x-1.5">
-            <MessageSquare className="w-3.5 h-3.5" />
-            <span>Live Transcript</span>
-          </div>
+        {/* Transcript */}
+        <div className="flex-1 overflow-y-auto min-h-0 px-4 py-4 space-y-2.5">
+          <p className="text-[10.5px] font-medium text-ink-3 uppercase tracking-[0.06em] flex items-center gap-1.5">
+            <MessageSquare className="w-3 h-3" />
+            Transcript
+          </p>
 
           {transcripts.length === 0 ? (
-            <div className="py-12 text-center text-xs text-zinc-400">
-              User speech and Gemini answers will appear here in real-time as you speak...
-            </div>
+            <p className="py-10 text-center text-[12px] text-ink-3">
+              Your conversation will appear here as you speak.
+            </p>
           ) : (
             transcripts.map((item) => (
               <div
                 key={item.id}
-                className={`p-3 rounded-2xl text-xs sm:text-sm leading-relaxed ${item.speaker === "user"
-                    ? "bg-zinc-900 text-white ml-8 rounded-tr-xs"
-                    : "bg-white text-zinc-800 border border-zinc-200 mr-8 rounded-tl-xs shadow-2xs"
-                  }`}
+                className={
+                  item.speaker === "user"
+                    ? "ml-8 rounded-2xl rounded-br-md bg-accent text-accent-ink px-3.5 py-2.5"
+                    : "mr-8 rounded-2xl rounded-bl-md bg-sunken text-ink px-3.5 py-2.5"
+                }
               >
-                <div className="text-[10px] font-semibold mb-1 opacity-70 uppercase tracking-wider">
-                  {item.speaker === "user" ? "You (Voice)" : "Gemini (Spoken)"}
-                </div>
-                <div>{item.text.trim()}</div>
+                <p
+                  className={`text-[10px] font-medium uppercase tracking-[0.06em] mb-1 ${
+                    item.speaker === "user" ? "opacity-60" : "text-ink-3"
+                  }`}
+                >
+                  {item.speaker === "user" ? "You" : "Assistant"}
+                </p>
+                <p className="text-[13px] leading-relaxed break-words">{item.text.trim()}</p>
               </div>
             ))
           )}
           <div ref={transcriptEndRef} />
         </div>
 
-        {/* Action Controls Bar */}
-        <div className="p-4 bg-white border-t border-zinc-200 flex items-center justify-between">
-          <div className="flex items-center space-x-2">
+        {/* Controls */}
+        <div className="shrink-0 px-4 py-3 border-t border-line flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5">
             <button
               id="btn-voice-mute"
               onClick={toggleMute}
-              className={`p-3 rounded-xl transition-colors ${isMuted
-                  ? "bg-rose-100 text-rose-700"
-                  : "bg-zinc-100 hover:bg-zinc-200 text-zinc-700"
-                }`}
-              title={isMuted ? "Unmute Mic" : "Mute Mic"}
+              title={isMuted ? "Unmute microphone" : "Mute microphone"}
+              aria-label={isMuted ? "Unmute microphone" : "Mute microphone"}
+              className={`p-2.5 rounded-lg transition-colors ${
+                isMuted
+                  ? "bg-critical-bg text-critical"
+                  : "text-ink-2 hover:text-ink hover:bg-sunken"
+              }`}
             >
-              {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+              {isMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
             </button>
 
             {isAiSpeaking && (
               <button
                 id="btn-voice-interrupt"
                 onClick={handleInterrupt}
-                className="flex items-center space-x-1.5 px-3 py-2.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-xs font-medium transition-colors"
-                title="Interrupt AI Speech"
+                title="Interrupt"
+                className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-[12px] font-medium text-ink-2 hover:text-ink hover:bg-sunken transition-colors"
               >
-                <Square className="w-3.5 h-3.5 fill-current" />
-                <span>Interrupt</span>
+                <Square className="w-3 h-3 fill-current" />
+                Interrupt
               </button>
             )}
           </div>
 
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center gap-1.5">
             <button
               id="btn-voice-reconnect"
               onClick={() => startLiveSession()}
               disabled={isConnecting}
-              className="p-3 text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded-xl transition-colors disabled:opacity-50"
-              title="Reconnect Session"
+              title="Reconnect session"
+              aria-label="Reconnect session"
+              className="p-2.5 rounded-lg text-ink-3 hover:text-ink hover:bg-sunken transition-colors disabled:opacity-40"
             >
               <RotateCcw className={`w-4 h-4 ${isConnecting ? "animate-spin" : ""}`} />
             </button>
@@ -737,9 +738,9 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
             <button
               id="btn-voice-done"
               onClick={onClose}
-              className="px-4 py-2.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-medium rounded-xl transition-colors shadow-xs"
+              className="px-3.5 py-2 rounded-lg bg-accent hover:bg-accent-hover text-accent-ink text-[12.5px] font-medium transition-colors"
             >
-              Done / Return to Chat
+              Done
             </button>
           </div>
         </div>

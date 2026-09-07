@@ -10,6 +10,7 @@ import { VoiceModal } from "./components/VoiceModal";
 import { CitationModal } from "./components/CitationModal";
 import { DocumentMetadata, ChatMessage, SourceCitation } from "./types";
 import { LiveAudioPlayer, speakWithBrowser } from "./lib/audioUtils";
+import { useTheme } from "./lib/theme";
 
 function getOrInitWorkspaceId(): string {
   const key = "pdf_rag_workspace_id";
@@ -22,6 +23,7 @@ function getOrInitWorkspaceId(): string {
 }
 
 export default function App() {
+  const { preference: themePreference, cycleTheme } = useTheme();
   const [workspaceId, setWorkspaceId] = useState<string>(getOrInitWorkspaceId);
   const [documents, setDocuments] = useState<DocumentMetadata[]>([]);
   const [totalChunks, setTotalChunks] = useState<number>(0);
@@ -131,30 +133,6 @@ export default function App() {
     } catch (err: any) {
       console.error("Upload error:", err);
       setUploadError(err?.message || "Upload failed. Please check the file and try again.");
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  // Load sample PDF
-  const handleLoadSampleDoc = async () => {
-    setIsUploading(true);
-    try {
-      const res = await fetch("/api/sample-doc", {
-        method: "POST",
-        headers: {
-          "x-workspace-id": workspaceId,
-        },
-      });
-
-      if (!res.ok) {
-        throw new Error("Failed to load sample document");
-      }
-
-      await loadWorkspace(workspaceId);
-    } catch (err: any) {
-      console.error("Sample document loading error:", err);
-      alert(`Could not load sample document: ${err?.message || "Error"}`);
     } finally {
       setIsUploading(false);
     }
@@ -387,7 +365,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="h-screen w-full flex flex-col bg-white overflow-hidden text-zinc-900 font-sans antialiased">
+    <div className="h-screen w-full flex flex-col bg-canvas text-ink overflow-hidden">
       {/* Top Header */}
       <Header
         workspaceId={workspaceId}
@@ -397,6 +375,8 @@ export default function App() {
         onResetWorkspace={handleResetWorkspace}
         onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
         isVoiceActive={isVoiceOpen}
+        themePreference={themePreference}
+        onCycleTheme={cycleTheme}
       />
 
       {/* Main Container */}
@@ -409,7 +389,6 @@ export default function App() {
           uploadError={uploadError}
           onDismissUploadError={() => setUploadError(null)}
           onUploadFiles={handleUploadFiles}
-          onLoadSampleDoc={handleLoadSampleDoc}
           onDeleteDocument={handleDeleteDocument}
           onResetWorkspace={handleResetWorkspace}
           isOpen={isSidebarOpen}

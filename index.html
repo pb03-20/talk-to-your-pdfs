@@ -11,6 +11,16 @@
     <meta name="twitter:card" content="summary_large_image" />
   </head>
   <body>
+    <script>
+      // Apply the saved theme before first paint. Without this the page
+      // renders in the default theme for a frame and then snaps over.
+      try {
+        var t = localStorage.getItem("pdf_rag_theme");
+        if (t === "light" || t === "dark") {
+          document.documentElement.setAttribute("data-theme", t);
+        }
+      } catch (e) {}
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
