@@ -142,21 +142,39 @@ export class LiveAudioPlayer {
 
   public onPlaybackComplete?: () => void;
 
+  /**
+   * Stops playback immediately.
+   *
+   * Deliberately does NOT fire `onPlaybackComplete`: that callback means "the
+   * assistant finished speaking naturally". Firing it here made every stop —
+   * including the one inside teardown — look like a completed turn, so
+   * teardown re-triggered the post-turn handler, which tore down again. The
+   * voice session rebuilt itself in a loop and never stayed connected.
+   */
   public stop() {
     if (this.safetyTimer !== null) {
       clearTimeout(this.safetyTimer);
       this.safetyTimer = null;
     }
     for (const src of this.activeSources) {
+      // Drop the handler first so stopping does not run end-of-queue logic.
+      src.onended = null;
       try { src.stop(); } catch (e) { /* already ended */ }
     }
     this.activeSources = [];
     this.nextStartTime = 0;
     this.isPlaying = false;
     this.turnDone = false;
-    if (this.onPlaybackComplete) {
-      this.onPlaybackComplete();
+  }
+
+  /** Releases the underlying AudioContext. Call when the player is discarded. */
+  public dispose() {
+    this.stop();
+    this.onPlaybackComplete = undefined;
+    if (this.audioCtx && this.audioCtx.state !== "closed") {
+      this.audioCtx.close().catch(() => { });
     }
+    this.audioCtx = null;
   }
 
   public get playing(): boolean {
@@ -167,13 +185,26 @@ export class LiveAudioPlayer {
 /**
  * Fallback browser text-to-speech
  */
-export function speakWithBrowser(text: string, onEnd?: () => void) {
-  if (!("speechSynthesis" in window)) return;
+export function speakWithBrowser(text: string, onEnd?: () => void): boolean {
+  if (!("speechSynthesis" in window)) {
+    onEnd?.();
+    return false;
+  }
   window.speechSynthesis.cancel();
   const clean = text.replace(/\[.*?\]/g, "").slice(0, 1000);
+  if (!clean.trim()) {
+    onEnd?.();
+    return false;
+  }
   const utterance = new SpeechSynthesisUtterance(clean);
   utterance.rate = 1.05;
   utterance.pitch = 1.0;
-  if (onEnd) utterance.onend = onEnd;
+  // Both handlers must clear the caller's state, otherwise a failed or
+  // cancelled utterance leaves the Read Aloud button stuck showing "Stop".
+  if (onEnd) {
+    utterance.onend = onEnd;
+    utterance.onerror = onEnd;
+  }
   window.speechSynthesis.speak(utterance);
+  return true;
 }

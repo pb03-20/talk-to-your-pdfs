@@ -19,6 +19,8 @@ export interface DocumentChunk {
   chunkIndex: number;
   text: string;
   embedding?: number[];
+  /** Which vector space `embedding` belongs to; only like-for-like compares. */
+  embeddingKind?: "remote" | "local";
 }
 
 export interface ChatMessage {
