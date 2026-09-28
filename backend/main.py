@@ -655,42 +655,89 @@ async def websocket_live_voice(
     client = get_gemini_client()
     live_models = [
         "gemini-2.5-flash-native-audio-latest",
+        "gemini-2.0-flash-live-001",
         "gemini-2.5-flash-native-audio-preview-12-2025",
         "gemini-3.1-flash-live-preview",
     ]
 
     session = None
     live_connect_cm = None
-    for l_model in live_models:
+    last_error = ""
+    MAX_RETRIES = 2  # retry each model up to 2 times on rate limit
+
+    def _build_live_config():
+        """Build LiveConnectConfig with VAD tuning, falling back to defaults
+        if the SDK version doesn't support the newer enum values."""
         try:
-            live_connect_cm = client.aio.live.connect(
-                model=l_model,
-                config=types.LiveConnectConfig(
-                    response_modalities=[types.Modality.AUDIO],
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
-                        )
-                    ),
-                    system_instruction=system_instruction,
-                    realtime_input_config=types.RealtimeInputConfig(
-                        automatic_activity_detection=types.AutomaticActivityDetection(
-                            disabled=False,
-                            start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_MEDIUM,
-                            end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
-                            silence_duration_ms=1200,
-                        )
-                    ),
+            vad_config = types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    disabled=False,
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_MEDIUM,
+                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                    silence_duration_ms=1200,
                 )
             )
-            session = await live_connect_cm.__aenter__()
+        except (AttributeError, TypeError):
+            # Older SDK — fall back to high sensitivity (the previous default)
+            try:
+                vad_config = types.RealtimeInputConfig(
+                    automatic_activity_detection=types.AutomaticActivityDetection(
+                        disabled=False,
+                        start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                        end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                        silence_duration_ms=1000,
+                    )
+                )
+            except Exception:
+                vad_config = None
+
+        config_kwargs = dict(
+            response_modalities=[types.Modality.AUDIO],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
+                )
+            ),
+            system_instruction=system_instruction,
+        )
+        if vad_config:
+            config_kwargs["realtime_input_config"] = vad_config
+        return types.LiveConnectConfig(**config_kwargs)
+
+    live_config = _build_live_config()
+
+    for l_model in live_models:
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                live_connect_cm = client.aio.live.connect(
+                    model=l_model,
+                    config=live_config,
+                )
+                session = await live_connect_cm.__aenter__()
+                break
+            except Exception as conn_err:
+                err_msg = str(conn_err)
+                last_error = err_msg
+                is_rate_limit = any(k in err_msg for k in ["429", "RESOURCE_EXHAUSTED", "quota", "rate"])
+                print(f"Warning: Live connect failed for {l_model} (attempt {attempt}): {err_msg}")
+                if is_rate_limit and attempt < MAX_RETRIES:
+                    # Backoff before retrying the same model
+                    await asyncio.sleep(2.0 * attempt)
+                    continue
+                else:
+                    break  # try next model
+        if session:
             break
-        except Exception as conn_err:
-            print(f"Warning: Live connect failed for {l_model}: {conn_err}")
-            continue
 
     if not session:
-        await websocket.send_json({"type": "error", "message": "Failed to connect to Gemini Live Voice service."})
+        # Surface the actual error so the user knows what went wrong
+        if "429" in last_error or "RESOURCE_EXHAUSTED" in last_error or "quota" in last_error:
+            user_msg = "Gemini API rate limit reached. Please wait 30-60 seconds and try again."
+        elif "API_KEY" in last_error or "key" in last_error.lower():
+            user_msg = "Invalid or missing GEMINI_API_KEY. Check your environment variables."
+        else:
+            user_msg = f"Failed to connect to Gemini Live Voice service. {last_error[:200]}"
+        await websocket.send_json({"type": "error", "message": user_msg})
         await websocket.close()
         return
 
