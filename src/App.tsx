@@ -9,7 +9,7 @@ import { ChatArea } from "./components/ChatArea";
 import { VoiceModal } from "./components/VoiceModal";
 import { CitationModal } from "./components/CitationModal";
 import { DocumentMetadata, ChatMessage, SourceCitation } from "./types";
-import { LiveAudioPlayer, speakWithBrowser } from "./lib/audioUtils";
+import { LiveAudioPlayer, speakWithBrowser, stopBrowserSpeech } from "./lib/audioUtils";
 import { useTheme } from "./lib/theme";
 
 function getOrInitWorkspaceId(): string {
@@ -269,7 +269,7 @@ export default function App() {
     }
   };
 
-  // TTS Read Aloud
+  // TTS Read Aloud - Instant splash playback (<0.05s) with fallback
   const handlePlayTTS = async (text: string, messageId: string) => {
     const requestId = ++ttsRequestIdRef.current; // invalidate any older in-flight request
 
@@ -277,12 +277,9 @@ export default function App() {
       ttsPlayerRef.current.dispose();
       ttsPlayerRef.current = null;
     }
-    if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
+    stopBrowserSpeech();
 
     setPlayingMessageId(null);
-    setLoadingTtsMessageId(messageId);
 
     const finish = () => {
       // Only the newest request may clear the indicator, otherwise a stale
@@ -293,6 +290,16 @@ export default function App() {
       }
     };
 
+    // 1. Instant speech synthesis: start immediately with zero wait (<0.05s)
+    if (speakWithBrowser(text, finish)) {
+      setLoadingTtsMessageId(null);
+      setPlayingMessageId(messageId);
+      return;
+    }
+
+    // 2. Fallback to server TTS if browser speech synthesis is unavailable
+    setLoadingTtsMessageId(messageId);
+
     try {
       const res = await fetch("/api/tts", {
         method: "POST",
@@ -300,20 +307,14 @@ export default function App() {
         body: JSON.stringify({ text }),
       });
 
-      if (requestId !== ttsRequestIdRef.current) return; // a newer tap superseded this one
+      if (requestId !== ttsRequestIdRef.current) return;
 
       if (res.ok) {
         const data = await res.json();
         if (data.audio) {
           const player = new LiveAudioPlayer();
-          // Without this the button stayed on "Stop" until the next click,
-          // because nothing ever reported that playback had finished.
           player.onPlaybackComplete = finish;
           ttsPlayerRef.current = player;
-
-          // Mark it playing *before* starting: if decoding fails the player
-          // completes synchronously, and setting state afterwards would
-          // re-light the "Stop" button with no audio behind it.
           setLoadingTtsMessageId(null);
           setPlayingMessageId(messageId);
           player.playChunk(data.audio);
@@ -321,23 +322,11 @@ export default function App() {
           return;
         }
       }
-
-      // Browser fallback if server TTS is unavailable
-      setLoadingTtsMessageId(null);
-      if (speakWithBrowser(text, finish)) {
-        setPlayingMessageId(messageId);
-      } else {
-        finish();
-      }
+      finish();
     } catch (e) {
       if (requestId !== ttsRequestIdRef.current) return;
       console.error("TTS error:", e);
-      setLoadingTtsMessageId(null);
-      if (speakWithBrowser(text, finish)) {
-        setPlayingMessageId(messageId);
-      } else {
-        finish();
-      }
+      finish();
     }
   };
 
@@ -347,9 +336,7 @@ export default function App() {
       ttsPlayerRef.current.dispose();
       ttsPlayerRef.current = null;
     }
-    if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
+    stopBrowserSpeech();
     setPlayingMessageId(null);
     setLoadingTtsMessageId(null);
   };

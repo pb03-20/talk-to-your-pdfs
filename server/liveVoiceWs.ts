@@ -29,7 +29,7 @@ const CONNECT_TIMEOUT_MS = 12000;
  * top of it. Combined with the sliding-window compression configured below,
  * this keeps sessions alive across many turns.
  */
-const CONTEXT_CHAR_BUDGET = 12000;
+const CONTEXT_CHAR_BUDGET = 24000;
 
 const LANGUAGE_CODES: Record<string, string> = {
   English: "en-US",
@@ -41,32 +41,58 @@ const LANGUAGE_CODES: Record<string, string> = {
 };
 
 /**
- * Builds document context for the voice session. The previous version took the
- * first 15 chunks truncated to 300 characters, which meant the assistant only
- * ever "knew" the opening page or two of the first PDF uploaded.
+ * Builds document context for the voice session by sampling the beginning,
+ * middle, and end of every document so the voice assistant has broad coverage
+ * of all uploaded material rather than only the first few pages.
  */
 function buildDocumentContext(chunks: DocumentChunk[]): string {
   if (chunks.length === 0) return "";
 
-  // Spread the budget evenly across chunks so later pages and later documents
-  // are represented too, instead of only the head of the index.
-  const perChunk = Math.max(
-    300,
-    Math.floor(CONTEXT_CHAR_BUDGET / Math.min(chunks.length, 120))
-  );
-  const selected =
-    chunks.length <= 120
-      ? chunks
-      : chunks.filter((_, i) => i % Math.ceil(chunks.length / 120) === 0);
+  // Group chunks by document filename, preserving page/chunk order.
+  const byDoc = new Map<string, DocumentChunk[]>();
+  for (const c of chunks) {
+    const arr = byDoc.get(c.filename) || [];
+    arr.push(c);
+    byDoc.set(c.filename, arr);
+  }
+
+  // Divide the budget across documents, with a minimum per doc.
+  const numDocs = byDoc.size;
+  const budgetPerDoc = Math.max(3000, Math.floor(CONTEXT_CHAR_BUDGET / numDocs));
 
   const sections: string[] = [];
-  let used = 0;
-  for (const c of selected) {
-    const text = c.text.slice(0, perChunk);
-    if (used + text.length > CONTEXT_CHAR_BUDGET) break;
-    used += text.length;
-    sections.push(`[${c.filename}, Page ${c.pageNumber}]: ${text}`);
+  let totalUsed = 0;
+
+  for (const [filename, docChunks] of byDoc) {
+    if (totalUsed >= CONTEXT_CHAR_BUDGET) break;
+
+    // Sort by page then chunk index.
+    docChunks.sort((a, b) => a.pageNumber - b.pageNumber || (a as any).chunkIndex - (b as any).chunkIndex);
+
+    // Sample beginning, middle, and end of the document.
+    const sampled: DocumentChunk[] = [];
+    if (docChunks.length <= 8) {
+      sampled.push(...docChunks);
+    } else {
+      // First 3, middle 2, last 3
+      sampled.push(...docChunks.slice(0, 3));
+      const midIdx = Math.floor(docChunks.length / 2);
+      sampled.push(...docChunks.slice(midIdx - 1, midIdx + 1));
+      sampled.push(...docChunks.slice(-3));
+    }
+
+    let docUsed = 0;
+    for (const c of sampled) {
+      const maxLen = Math.min(600, budgetPerDoc - docUsed);
+      if (maxLen <= 50) break;
+      const text = c.text.slice(0, maxLen);
+      sections.push(`[${filename}, Page ${c.pageNumber}]: ${text}`);
+      docUsed += text.length;
+      totalUsed += text.length;
+      if (totalUsed >= CONTEXT_CHAR_BUDGET) break;
+    }
   }
+
   return sections.join("\n\n");
 }
 
@@ -104,16 +130,22 @@ export function setupLiveVoiceWebSocket(wss: WebSocketServer) {
         : `5. Reply in whichever language the user speaks to you in.`;
 
     const systemInstruction = `You are the real-time voice assistant for "Talk to Your PDFs".
-You are conversing with the user via live voice. Keep answers spoken, clear, conversational, and direct.
+You are having a live voice conversation with the user. Speak clearly, naturally, and conversationally.
 
 DOCUMENT CONTEXT:
 ${docContextSummary}
 
-RULES:
-1. Ground your answers in the user's uploaded PDFs when applicable.
-2. If asked about facts found in the documents, mention the document name and page number.
-3. If the requested information is not in the PDFs, explicitly tell the user: "I couldn't find that in your uploaded PDFs." Do NOT make up facts.
-4. Keep spoken responses concise and easy to listen to (avoid huge lists; give summaries with key page references).
+STRICT GROUNDING RULES:
+1. ONLY answer from the document context provided above. Every claim must trace back to the uploaded PDFs.
+2. When stating facts from the documents, always mention the document name and page number (e.g. "According to Report.pdf, page 5...").
+3. If the information is NOT in the provided document context, say clearly: "I don't see information about that in your uploaded PDFs. Could you rephrase your question, or it might be on a page I don't have in my current context."
+4. NEVER fabricate, guess, or use your general knowledge to fill gaps. If you're unsure, say so.
+5. If the user's question is vague or ambiguous, ask a brief clarifying question before answering (e.g. "Are you asking about chapter 3's analysis or the summary in the introduction?").
+
+RESPONSE STYLE:
+6. Keep responses concise and spoken-friendly — 2-4 sentences for simple questions, up to a short paragraph for complex ones.
+7. Avoid reading long lists verbatim. Summarize key points and mention where the full list can be found.
+8. When the user asks follow-up questions, connect them to the previous context naturally.
 ${languageRule}`;
 
     const languageCode = LANGUAGE_CODES[responseLanguage];
@@ -219,6 +251,21 @@ ${languageRule}`;
               // hit "Reconnect Session" to ask anything else. A sliding window
               // discards the oldest turns instead of ending the conversation.
               contextWindowCompression: { slidingWindow: {} },
+              // Voice Activity Detection tuning:
+              // - Longer silence (1200ms) so users can pause mid-thought
+              //   without being cut off (was implicitly short/default).
+              // - Lower end-of-speech sensitivity avoids premature
+              //   turn-ending that truncated user queries.
+              // - Medium start sensitivity reduces false triggers from
+              //   background noise while still catching normal speech.
+              realtimeInputConfig: {
+                automaticActivityDetection: {
+                  disabled: false,
+                  startOfSpeechSensitivity: "START_SENSITIVITY_MEDIUM" as any,
+                  endOfSpeechSensitivity: "END_SENSITIVITY_LOW" as any,
+                  silenceDuration: { seconds: 1, nanos: 200000000 }, // 1.2s
+                },
+              },
               systemInstruction,
             },
             callbacks: {

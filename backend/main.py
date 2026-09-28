@@ -573,7 +573,7 @@ async def text_to_speech(req: TTSRequest):
     if is_truncated:
         clean_text = clean_text[:MAX_TTS_TOTAL]
 
-    text_chunks = _chunk_text_for_tts(clean_text, max_chars=800)
+    text_chunks = _chunk_text_for_tts(clean_text, max_chars=2500)
     if not text_chunks:
         raise HTTPException(status_code=400, detail="No speakable text found")
 
@@ -636,10 +636,19 @@ async def websocket_live_voice(
     )
 
     system_instruction = (
-        f"You are the voice assistant for 'Talk to Your PDFs'.\n"
-        f"Documents in workspace:\n{doc_summary or 'No documents'}\n"
-        f"Answer the user's questions clearly, concisely, and factually based on their PDFs. "
-        f"Cite page numbers when stating facts. If not in the PDFs, say you could not find it.\n"
+        f"You are the real-time voice assistant for 'Talk to Your PDFs'.\n"
+        f"You are having a live voice conversation with the user. Speak clearly, naturally, and conversationally.\n\n"
+        f"Documents in workspace:\n{doc_summary or 'No documents'}\n\n"
+        f"STRICT GROUNDING RULES:\n"
+        f"1. ONLY answer from the uploaded PDFs. Every claim must trace back to the documents.\n"
+        f"2. When stating facts, always mention the document name and page number (e.g. 'According to Report.pdf, page 5...').\n"
+        f"3. If the information is NOT in the PDFs, say clearly: 'I don't see information about that in your uploaded PDFs. Could you rephrase your question?'\n"
+        f"4. NEVER fabricate, guess, or use general knowledge to fill gaps. If unsure, say so.\n"
+        f"5. If the user's question is vague or ambiguous, ask a brief clarifying question before answering.\n\n"
+        f"RESPONSE STYLE:\n"
+        f"6. Keep responses concise and spoken-friendly — 2-4 sentences for simple questions, up to a short paragraph for complex ones.\n"
+        f"7. Avoid reading long lists verbatim. Summarize key points and mention where the full list can be found.\n"
+        f"8. When the user asks follow-up questions, connect them to the previous context naturally.\n"
         f"LANGUAGE: {language_instruction}"
     )
 
@@ -667,9 +676,9 @@ async def websocket_live_voice(
                     realtime_input_config=types.RealtimeInputConfig(
                         automatic_activity_detection=types.AutomaticActivityDetection(
                             disabled=False,
-                            start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
-                            end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
-                            silence_duration_ms=500,
+                            start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_MEDIUM,
+                            end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                            silence_duration_ms=1200,
                         )
                     ),
                 )

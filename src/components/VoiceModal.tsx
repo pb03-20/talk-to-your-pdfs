@@ -272,12 +272,12 @@ export const VoiceModal: React.FC<VoiceModalProps> = ({
         let energy = 0;
         for (let i = 0; i < inputData.length; i++) energy += inputData[i] * inputData[i];
         const rms = Math.sqrt(energy / inputData.length);
-        bargeInFramesRef.current = rms > 0.018 ? bargeInFramesRef.current + 1 : 0;
+        bargeInFramesRef.current = rms > 0.03 ? bargeInFramesRef.current + 1 : 0;
 
-        // Three consecutive frames (~750ms) distinguishes real speech from
+        // Four consecutive frames (~1s) distinguishes real speech from
         // residual speaker audio that echo cancellation did not remove.
         if (
-          bargeInFramesRef.current >= 3 &&
+          bargeInFramesRef.current >= 4 &&
           Date.now() - lastInterruptRef.current > 1000
         ) {
           lastInterruptRef.current = Date.now();

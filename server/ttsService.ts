@@ -6,10 +6,8 @@ const MAX_TTS_TOTAL = 4000;
 // Gemini TTS latency scales with chunk length, and chunks render in parallel,
 // so smaller chunks finish sooner overall. Splitting stays on sentence
 // boundaries, which keeps the prosody natural.
-const MAX_CHUNK_CHARS = 350;
-/** How many chunks to synthesize at once. Kept modest so a long answer does
- *  not burst straight through a free-tier per-minute quota. */
-const CONCURRENCY = 3;
+const MAX_CHUNK_CHARS = 2500;
+const CONCURRENCY = 2;
 
 export interface TtsResult {
   audio: string;

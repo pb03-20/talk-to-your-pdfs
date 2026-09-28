@@ -182,29 +182,120 @@ export class LiveAudioPlayer {
   }
 }
 
+let chromeResumeInterval: any = null;
+
+function clearChromeResume() {
+  if (chromeResumeInterval) {
+    clearInterval(chromeResumeInterval);
+    chromeResumeInterval = null;
+  }
+}
+
 /**
- * Fallback browser text-to-speech
+ * Instant browser text-to-speech with natural voice selection & sentence streaming
  */
 export function speakWithBrowser(text: string, onEnd?: () => void): boolean {
-  if (!("speechSynthesis" in window)) {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
     onEnd?.();
     return false;
   }
+
+  clearChromeResume();
   window.speechSynthesis.cancel();
-  const clean = text.replace(/\[.*?\]/g, "").slice(0, 1000);
-  if (!clean.trim()) {
+
+  // Strip citations, bold/markdown, bullet points, code blocks for clean narration
+  const clean = text
+    .replace(/\[.*?\]/g, "")
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`.*?`/g, "")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/[*_#]/g, " ")
+    .replace(/^\s*[-•*]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!clean) {
     onEnd?.();
     return false;
   }
-  const utterance = new SpeechSynthesisUtterance(clean);
-  utterance.rate = 1.05;
-  utterance.pitch = 1.0;
-  // Both handlers must clear the caller's state, otherwise a failed or
-  // cancelled utterance leaves the Read Aloud button stuck showing "Stop".
-  if (onEnd) {
-    utterance.onend = onEnd;
-    utterance.onerror = onEnd;
+
+  // Split into natural sentences so long text never drops or stutters
+  const sentences = clean.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [clean];
+  const validSentences = sentences.map((s) => s.trim()).filter((s) => s.length > 0);
+
+  if (validSentences.length === 0) {
+    onEnd?.();
+    return false;
   }
-  window.speechSynthesis.speak(utterance);
+
+  // Find the highest-quality natural voice available
+  const voices = window.speechSynthesis.getVoices();
+  const selectedVoice =
+    voices.find(
+      (v) =>
+        v.lang.startsWith("en") &&
+        (v.name.includes("Natural") ||
+          v.name.includes("Online") ||
+          v.name.includes("Google") ||
+          v.name.includes("Neural"))
+    ) ||
+    voices.find((v) => v.lang.startsWith("en") && !v.localService) ||
+    voices.find((v) => v.lang.startsWith("en")) ||
+    null;
+
+  let completedCount = 0;
+  const total = validSentences.length;
+
+  const handleFinish = () => {
+    clearChromeResume();
+    onEnd?.();
+  };
+
+  validSentences.forEach((sentence, idx) => {
+    const utterance = new SpeechSynthesisUtterance(sentence);
+    if (selectedVoice) {
+      utterance.voice = selectedVoice;
+    }
+    utterance.rate = 1.02;
+    utterance.pitch = 1.0;
+
+    const isLast = idx === total - 1;
+
+    utterance.onend = () => {
+      completedCount++;
+      if (isLast || completedCount >= total) {
+        handleFinish();
+      }
+    };
+
+    utterance.onerror = (e) => {
+      if (e.error !== "canceled" && e.error !== "interrupted") {
+        console.warn("Speech synthesis error:", e);
+      }
+      completedCount++;
+      if (isLast || completedCount >= total) {
+        handleFinish();
+      }
+    };
+
+    window.speechSynthesis.speak(utterance);
+  });
+
+  // Keep Chrome's speech engine awake for long texts
+  chromeResumeInterval = setInterval(() => {
+    if (!window.speechSynthesis.speaking) {
+      clearChromeResume();
+    } else if (window.speechSynthesis.paused) {
+      window.speechSynthesis.resume();
+    }
+  }, 5000);
+
   return true;
+}
+
+export function stopBrowserSpeech() {
+  clearChromeResume();
+  if (typeof window !== "undefined" && "speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
+  }
 }
