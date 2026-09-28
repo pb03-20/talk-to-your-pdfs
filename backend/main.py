@@ -615,6 +615,97 @@ async def text_to_speech(req: TTSRequest):
         "isTruncated": is_truncated
     }
 
+def build_voice_document_context(ws: Dict[str, Any], max_chars: int = 40000) -> str:
+    """Builds rich grounding context from uploaded document summaries and vector chunks."""
+    docs = ws.get("documents", [])
+    chunks = ws.get("chunks", [])
+    if not docs:
+        return "No documents have been uploaded to this workspace yet. Inform the user to upload PDFs."
+
+    parts = []
+    summaries = ws.get("summaries", {})
+    doc_lines = []
+    for d in docs:
+        d_id = d.get("id")
+        fname = d.get("filename")
+        pages = d.get("totalPages", 1)
+        summ = summaries.get(d_id, "")
+        if summ:
+            doc_lines.append(f"• Document '{fname}' ({pages} pages):\n  Summary: {summ}")
+        else:
+            doc_lines.append(f"• Document '{fname}' ({pages} pages)")
+    parts.append("DOCUMENTS IN WORKSPACE:\n" + "\n".join(doc_lines))
+
+    if chunks:
+        by_doc: Dict[str, List[Dict[str, Any]]] = {}
+        for c in chunks:
+            by_doc.setdefault(c["filename"], []).append(c)
+
+        chunk_lines = []
+        chars_used = 0
+        budget_per_doc = max(4000, max_chars // max(1, len(by_doc)))
+
+        for fname, d_chunks in by_doc.items():
+            sorted_chunks = sorted(d_chunks, key=lambda c: (c.get("page_number", 0), c.get("chunk_index", 0)))
+            if len(sorted_chunks) <= 10:
+                sampled = sorted_chunks
+            else:
+                sampled = (
+                    sorted_chunks[:4]
+                    + sorted_chunks[len(sorted_chunks)//2 - 1 : len(sorted_chunks)//2 + 2]
+                    + sorted_chunks[-4:]
+                )
+
+            doc_chars = 0
+            for sc in sampled:
+                if chars_used >= max_chars or doc_chars >= budget_per_doc:
+                    break
+                text_slice = sc.get("text", "")[:600].strip()
+                if text_slice:
+                    chunk_lines.append(f"[{fname}, Page {sc.get('page_number', '?')}]: {text_slice}")
+                    doc_chars += len(text_slice)
+                    chars_used += len(text_slice)
+
+        if chunk_lines:
+            parts.append("DOCUMENT EXCERPTS (Pre-loaded from Vector Index):\n" + "\n\n".join(chunk_lines))
+
+    return "\n\n".join(parts)
+
+
+def execute_voice_vector_search(ws: Dict[str, Any], query: str, top_k: int = 6) -> str:
+    """Retrieves relevant chunks using hybrid vector embedding + BM25 search for voice agent."""
+    all_chunks = ws.get("chunks", [])
+    if not all_chunks:
+        return "No document chunks available in this workspace."
+
+    bm25 = ws.get("bm25_index")
+    if bm25 is None:
+        refresh_workspace_bm25(ws)
+        bm25 = ws.get("bm25_index")
+
+    target_doc_id = detect_targeted_document(query, ws.get("documents", []))
+
+    retrieved = hybrid_retrieve(
+        query=query,
+        chunks=all_chunks,
+        bm25_index=bm25,
+        top_k=top_k,
+        use_query_expansion=True,
+        target_doc_id=target_doc_id
+    )
+
+    if not retrieved:
+        return f"No relevant chunks found in the documents for query: '{query}'."
+
+    results = []
+    for sc in retrieved:
+        score = sc.get("score", 0)
+        results.append(
+            f"[{sc['filename']}, Page {sc['page_number']}] (Relevance: {score:.2f}):\n{sc['text']}"
+        )
+    return "\n\n---\n\n".join(results)
+
+
 @app.websocket("/api/live-voice")
 async def websocket_live_voice(
     websocket: WebSocket,
@@ -623,8 +714,7 @@ async def websocket_live_voice(
 ):
     await websocket.accept()
     ws = get_or_create_workspace(workspaceId)
-    docs = ws["documents"]
-    doc_summary = "\n".join([f"- {d['filename']} ({d['totalPages']} pages)" for d in docs])
+    doc_context = build_voice_document_context(ws)
 
     selected_language = responseLanguage.strip()[:32]
     language_instruction = (
@@ -636,38 +726,56 @@ async def websocket_live_voice(
     )
 
     system_instruction = (
-        f"You are the real-time voice assistant for 'Talk to Your PDFs'.\n"
-        f"You are having a live voice conversation with the user. Speak clearly, naturally, and conversationally.\n\n"
-        f"Documents in workspace:\n{doc_summary or 'No documents'}\n\n"
-        f"STRICT GROUNDING RULES:\n"
-        f"1. ONLY answer from the uploaded PDFs. Every claim must trace back to the documents.\n"
-        f"2. When stating facts, always mention the document name and page number (e.g. 'According to Report.pdf, page 5...').\n"
-        f"3. If the information is NOT in the PDFs, say clearly: 'I don't see information about that in your uploaded PDFs. Could you rephrase your question?'\n"
-        f"4. NEVER fabricate, guess, or use general knowledge to fill gaps. If unsure, say so.\n"
-        f"5. If the user's question is vague or ambiguous, ask a brief clarifying question before answering.\n\n"
-        f"RESPONSE STYLE:\n"
-        f"6. Keep responses concise and spoken-friendly — 2-4 sentences for simple questions, up to a short paragraph for complex ones.\n"
-        f"7. Avoid reading long lists verbatim. Summarize key points and mention where the full list can be found.\n"
-        f"8. When the user asks follow-up questions, connect them to the previous context naturally.\n"
-        f"LANGUAGE: {language_instruction}"
+        "You are the real-time voice assistant for 'Talk to Your PDFs'.\n"
+        "You have access to documents uploaded by the user with pre-computed vector embeddings.\n\n"
+        f"{doc_context}\n\n"
+        "CRITICAL GROUNDING AND VECTOR RETRIEVAL RULES:\n"
+        "1. When the user asks ANY question about the documents, search for the relevant facts using the `search_vector_chunks` tool.\n"
+        "2. Your core mission is to summarize the retrieved vector embedding chunks into a concise, accurate spoken answer.\n"
+        "3. Keep your spoken answers concise: 2 to 4 clear, informative sentences.\n"
+        "4. ALWAYS state the exact document name and page number for each fact (e.g. 'According to Report.pdf, page 5...').\n"
+        "5. If the information is not found in the documents or vector chunks, explicitly say: 'I could not find information about that in your uploaded documents.'\n"
+        "6. NEVER fabricate, guess, or assume information outside the provided document chunks.\n"
+        f"7. LANGUAGE: {language_instruction}"
     )
 
     client = get_gemini_client()
     live_models = [
         "gemini-2.5-flash-native-audio-latest",
-        "gemini-2.0-flash-live-001",
         "gemini-2.5-flash-native-audio-preview-12-2025",
-        "gemini-3.1-flash-live-preview",
+        "gemini-2.5-flash-native-audio-preview-09-2025",
     ]
+
+    search_tool = types.Tool(
+        function_declarations=[
+            types.FunctionDeclaration(
+                name="search_vector_chunks",
+                description=(
+                    "Searches the workspace vector embeddings and document database to retrieve the most relevant "
+                    "chunks and page numbers for the user's question. Call this tool to look up facts, figures, "
+                    "or topics in the uploaded PDFs before answering."
+                ),
+                parameters=types.Schema(
+                    type="OBJECT",
+                    properties={
+                        "query": types.Schema(
+                            type="STRING",
+                            description="The search query or keyword phrase to retrieve from the vector index."
+                        )
+                    },
+                    required=["query"]
+                )
+            )
+        ]
+    )
 
     session = None
     live_connect_cm = None
     last_error = ""
-    MAX_RETRIES = 2  # retry each model up to 2 times on rate limit
+    MAX_RETRIES = 2
 
     def _build_live_config():
-        """Build LiveConnectConfig with VAD tuning, falling back to defaults
-        if the SDK version doesn't support the newer enum values."""
+        """Build LiveConnectConfig with vector retrieval tool and VAD tuning."""
         try:
             vad_config = types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
@@ -678,7 +786,6 @@ async def websocket_live_voice(
                 )
             )
         except (AttributeError, TypeError):
-            # Older SDK — fall back to high sensitivity (the previous default)
             try:
                 vad_config = types.RealtimeInputConfig(
                     automatic_activity_detection=types.AutomaticActivityDetection(
@@ -698,6 +805,9 @@ async def websocket_live_voice(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
                 )
             ),
+            tools=[search_tool],
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
             system_instruction=system_instruction,
         )
         if vad_config:
@@ -721,16 +831,14 @@ async def websocket_live_voice(
                 is_rate_limit = any(k in err_msg for k in ["429", "RESOURCE_EXHAUSTED", "quota", "rate"])
                 print(f"Warning: Live connect failed for {l_model} (attempt {attempt}): {err_msg}")
                 if is_rate_limit and attempt < MAX_RETRIES:
-                    # Backoff before retrying the same model
                     await asyncio.sleep(2.0 * attempt)
                     continue
                 else:
-                    break  # try next model
+                    break
         if session:
             break
 
     if not session:
-        # Surface the actual error so the user knows what went wrong
         if "429" in last_error or "RESOURCE_EXHAUSTED" in last_error or "quota" in last_error:
             user_msg = "Gemini API rate limit reached. Please wait 30-60 seconds and try again."
         elif "API_KEY" in last_error or "key" in last_error.lower():
@@ -758,30 +866,66 @@ async def websocket_live_voice(
                         audio=types.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
                     )
                 elif msg_type == "text" and data.get("text"):
+                    user_text = data["text"]
+                    vector_context = execute_voice_vector_search(ws, user_text, top_k=5)
+                    turn_prompt = (
+                        f"User Query: {user_text}\n\n"
+                        f"Retrieved Document Chunks:\n{vector_context}\n\n"
+                        "Please answer the user's question concisely based on these retrieved chunks."
+                    )
                     try:
                         await session.send_client_content(
-                            turns=[types.Content(parts=[types.Part.from_text(text=data["text"])])],
+                            turns=[types.Content(parts=[types.Part.from_text(text=turn_prompt)])],
                             turn_complete=True
                         )
                     except Exception as te:
                         print(f"Text input error: {te}")
                 elif msg_type == "interrupt":
-                    # Stop only browser playback here. The next microphone
-                    # frames are sent as real-time input, allowing Gemini Live
-                    # to detect and handle the user's barge-in naturally.
                     await websocket.send_json({"type": "interrupted"})
 
         async def receive_from_gemini():
             async for response in session.receive():
+                # 1. Handle tool calls: execute vector embedding search & return tool response
+                if response.tool_call is not None:
+                    fn_responses = []
+                    for call in response.tool_call.function_calls:
+                        query_arg = call.args.get("query", "") if call.args else ""
+                        print(f"[live-voice] vector tool call: {call.name}(query='{query_arg}')")
+                        await websocket.send_json({
+                            "type": "status",
+                            "message": f"Searching vector index for: {query_arg[:40]}..."
+                        })
+                        search_result = execute_voice_vector_search(ws, query_arg, top_k=6)
+                        fn_responses.append(
+                            types.FunctionResponse(
+                                name=call.name,
+                                id=call.id,
+                                response={"result": search_result}
+                            )
+                        )
+                    if fn_responses:
+                        await session.send_tool_response(function_responses=fn_responses)
+
+                # 2. Handle server content: audio streaming, transcripts, turns
                 server_content = response.server_content
-                print(
-                    f"[live-voice] response received: has_content={server_content is not None}, "
-                    f"turn_complete={getattr(server_content, 'turn_complete', None) if server_content else None}, "
-                    f"interrupted={getattr(server_content, 'interrupted', None) if server_content else None}"
-                )
                 if server_content is not None:
                     if getattr(server_content, "interrupted", False):
                         await websocket.send_json({"type": "interrupted"})
+
+                    # Transcriptions for user speech and model speech
+                    input_transcription = getattr(server_content, "input_transcription", None)
+                    if input_transcription and getattr(input_transcription, "text", None):
+                        await websocket.send_json({
+                            "type": "inputTranscript",
+                            "text": input_transcription.text
+                        })
+
+                    output_transcription = getattr(server_content, "output_transcription", None)
+                    if output_transcription and getattr(output_transcription, "text", None):
+                        await websocket.send_json({
+                            "type": "outputTranscript",
+                            "text": output_transcription.text
+                        })
 
                     model_turn = server_content.model_turn
                     if model_turn is not None:
@@ -793,7 +937,7 @@ async def websocket_live_voice(
                                 else:
                                     audio_b64 = part_data
                                 await websocket.send_json({"type": "audio", "audio": audio_b64})
-                            if part.text:
+                            elif part.text and not getattr(part, "thought", False) and not output_transcription:
                                 clean_text = re.sub(r"\*\*.*?\*\*", "", part.text).strip()
                                 if clean_text:
                                     await websocket.send_json({"type": "outputTranscript", "text": clean_text})

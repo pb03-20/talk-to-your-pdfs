@@ -13,9 +13,8 @@ import { DocumentChunk } from "./types.js";
  */
 const LIVE_MODEL_CANDIDATES = [
   "gemini-2.5-flash-native-audio-latest",
-  "gemini-2.0-flash-live-001",
+  "gemini-2.5-flash-native-audio-preview-12-2025",
   "gemini-2.5-flash-native-audio-preview-09-2025",
-  "gemini-3.1-flash-live-preview",
 ];
 
 /** A hung Live handshake must fail loudly rather than hang the client. */
