@@ -2,18 +2,16 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   FileText,
   ShieldCheck,
-  Key,
-  ExternalLink,
   Sun,
   Moon,
   MonitorSmartphone,
   CheckCircle2,
   AlertCircle,
-  HelpCircle,
   Sparkles,
   Lock,
+  ArrowRight,
 } from "lucide-react";
-import { AuthUser, decodeGoogleCredential, getGoogleClientId, setGoogleClientId } from "../lib/auth";
+import { AuthUser, decodeGoogleCredential, getGoogleClientId } from "../lib/auth";
 import { ThemePreference } from "../lib/theme";
 
 interface LoginPageProps {
@@ -80,11 +78,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   onCycleTheme,
 }) => {
   const [clientId, setClientId] = useState<string>(getGoogleClientId());
-  const [inputClientId, setInputClientId] = useState<string>(clientId);
   const [isGisReady, setIsGisReady] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [isEditingClientId, setIsEditingClientId] = useState<boolean>(!clientId);
-  const [isInitializing, setIsInitializing] = useState<boolean>(false);
+  const [isLoadingConfig, setIsLoadingConfig] = useState<boolean>(!clientId);
 
   const googleBtnContainerRef = useRef<HTMLDivElement>(null);
 
@@ -102,28 +98,29 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch server-configured Client ID from backend (/api/config) if not yet set in browser
+  // Auto-fetch builder's client ID from backend (/api/config) if not embedded in build
   useEffect(() => {
     if (!clientId) {
+      setIsLoadingConfig(true);
       fetch("/api/config")
         .then((res) => (res.ok ? res.json() : null))
         .then((data) => {
           if (data?.googleClientId) {
             setClientId(data.googleClientId);
-            setInputClientId(data.googleClientId);
-            setIsEditingClientId(false);
           }
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          setIsLoadingConfig(false);
+        });
     }
   }, [clientId]);
 
-  // Initialize official Google Identity Services once Client ID and GIS are ready
+  // Render official Google button once GIS and builder Client ID are available
   useEffect(() => {
     if (!isGisReady || !clientId || !googleBtnContainerRef.current) return;
 
     try {
-      setIsInitializing(true);
       setAuthError(null);
 
       window.google?.accounts.id.initialize({
@@ -144,10 +141,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         cancel_on_tap_outside: true,
       });
 
-      // Clear previous button render
       googleBtnContainerRef.current.innerHTML = "";
-
-      // Render official Google Sign In button
       window.google?.accounts.id.renderButton(googleBtnContainerRef.current, {
         theme: themePreference === "dark" ? "filled_black" : "outline",
         size: "large",
@@ -157,52 +151,17 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         logo_alignment: "left",
       });
 
-      // Optionally trigger One Tap prompt for users already signed in to Google
+      // Show Google One Tap popup if user is logged into Google in their browser
       try {
-        window.google?.accounts.id.prompt((notification: any) => {
-          if (notification.isNotDisplayed()) {
-            console.log("Google One Tap suppressed:", notification.getNotDisplayedReason());
-          }
-        });
+        window.google?.accounts.id.prompt();
       } catch (e) {
         // One tap prompt is optional
       }
     } catch (err: any) {
       console.error("Error setting up Google Identity Services:", err);
-      setAuthError("Could not initialize Google Sign-In. Please verify that your Client ID is correct.");
-    } finally {
-      setIsInitializing(false);
+      setAuthError("Could not initialize Google Sign-In. Please refresh the page.");
     }
   }, [isGisReady, clientId, themePreference, onLoginSuccess]);
-
-  const handleSaveClientId = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = inputClientId.trim();
-    if (!trimmed) {
-      setAuthError("Please enter a valid Google OAuth Client ID.");
-      return;
-    }
-    setGoogleClientId(trimmed);
-    setClientId(trimmed);
-    setIsEditingClientId(false);
-    setAuthError(null);
-  };
-
-  const handleLaunchGooglePrompt = () => {
-    if (!isGisReady) {
-      setAuthError("Google Identity Services is still loading. Please check your internet connection.");
-      return;
-    }
-    if (!clientId) {
-      setIsEditingClientId(true);
-      return;
-    }
-    try {
-      window.google?.accounts.id.prompt();
-    } catch (e) {
-      console.warn("Could not open Google prompt:", e);
-    }
-  };
 
   const ThemeIcon =
     themePreference === "light" ? Sun : themePreference === "dark" ? Moon : MonitorSmartphone;
@@ -250,7 +209,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 Sign in with Google
               </h1>
               <p className="text-ink-2 text-[13.5px] mt-1.5 leading-relaxed">
-                Continue with your Google account to verify your email and access your private document library.
+                Continue with your Google account to access your document library and Gemini voice assistant.
               </p>
             </div>
 
@@ -262,113 +221,67 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               </div>
             )}
 
-            {/* If Client ID is configured, render official Google Sign In button */}
-            {clientId && !isEditingClientId ? (
-              <div className="space-y-4">
-                <div className="flex flex-col items-center justify-center py-2">
-                  <div
-                    ref={googleBtnContainerRef}
-                    className="flex justify-center min-h-[44px] w-full"
-                  />
-                  {!isGisReady && (
-                    <div className="text-xs text-ink-3 mt-2 flex items-center gap-1.5">
-                      <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                      <span>Loading Google Identity Services...</span>
-                    </div>
-                  )}
-                </div>
+            {/* Official Google Sign-In Button Container */}
+            <div className="space-y-4">
+              <div className="flex flex-col items-center justify-center py-3 min-h-[56px]">
+                <div
+                  ref={googleBtnContainerRef}
+                  className="flex justify-center min-h-[44px] w-full"
+                />
 
-                <div className="pt-2 border-t border-line flex items-center justify-between text-xs text-ink-3">
-                  <span className="flex items-center gap-1.5 truncate max-w-[220px]">
-                    <ShieldCheck className="w-3.5 h-3.5 text-positive shrink-0" />
-                    <span>Real Google OAuth 2.0</span>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setInputClientId(clientId);
-                      setIsEditingClientId(true);
-                    }}
-                    className="text-ink hover:underline text-[11.5px]"
-                  >
-                    Change Client ID
-                  </button>
-                </div>
+                {(!isGisReady || isLoadingConfig || !clientId) && (
+                  <div className="text-xs text-ink-3 mt-2 flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                    <span>Connecting to Google authentication...</span>
+                  </div>
+                )}
               </div>
-            ) : (
-              /* Client ID Setup Form */
-              <div className="space-y-4">
-                <div className="p-3.5 rounded-xl bg-sunken/80 border border-line text-xs space-y-2.5">
-                  <div className="flex items-center gap-2 font-medium text-ink">
-                    <Key className="w-4 h-4 text-accent" />
-                    <span>Enter your Free Google OAuth Client ID</span>
-                  </div>
-                  <p className="text-ink-2 text-[11.5px] leading-relaxed">
-                    To authenticate real users via their Google email, Google requires an OAuth 2.0 Web Client ID. It is 100% free with zero fees:
-                  </p>
-                  <ol className="list-decimal list-inside space-y-1 text-[11px] text-ink-2 pl-0.5">
-                    <li>
-                      Open{" "}
-                      <a
-                        href="https://console.cloud.google.com/apis/credentials"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-blue-500 hover:underline font-medium inline-flex items-center gap-0.5"
-                      >
-                        Google Cloud Console Credentials <ExternalLink className="w-2.5 h-2.5 inline" />
-                      </a>
-                    </li>
-                    <li>
-                      Create <strong>OAuth client ID</strong> &rarr; Application type: <strong>Web application</strong>.
-                    </li>
-                    <li>
-                      Add <code className="bg-surface px-1 py-0.5 rounded border border-line font-mono">http://localhost:3000</code> to <strong>Authorized JavaScript origins</strong>.
-                    </li>
-                    <li>Paste your Client ID below:</li>
-                  </ol>
-                </div>
 
-                <form onSubmit={handleSaveClientId} className="space-y-3">
-                  <div>
-                    <label className="block text-[11.5px] font-medium text-ink-2 mb-1">
-                      Google OAuth Client ID:
-                    </label>
-                    <input
-                      type="text"
-                      value={inputClientId}
-                      onChange={(e) => setInputClientId(e.target.value)}
-                      placeholder="e.g. 123456789-abcdef.apps.googleusercontent.com"
-                      className="w-full h-9 px-3 rounded-lg bg-sunken border border-line text-xs text-ink placeholder:text-ink-3 focus:outline-none focus:border-ink font-mono transition-colors"
-                      required
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-end gap-2 pt-1">
-                    {clientId && (
-                      <button
-                        type="button"
-                        onClick={() => setIsEditingClientId(false)}
-                        className="h-8 px-3 rounded-lg text-xs text-ink-2 hover:bg-sunken transition-colors"
-                      >
-                        Cancel
-                      </button>
-                    )}
-                    <button
-                      type="submit"
-                      className="h-9 px-4 rounded-lg bg-accent text-accent-ink hover:bg-accent-hover text-xs font-medium transition-colors flex items-center gap-2"
-                    >
-                      <GoogleIcon className="w-3.5 h-3.5" />
-                      <span>Save & Activate Google Sign-In</span>
-                    </button>
-                  </div>
-                </form>
+              <div className="pt-3 border-t border-line flex items-center justify-center text-xs text-ink-3">
+                <span className="flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-positive shrink-0" />
+                  <span>Verified Google Account Authentication</span>
+                </span>
               </div>
-            )}
+            </div>
 
             {/* Privacy & Authentication Guarantee */}
             <div className="mt-5 pt-4 border-t border-line text-center text-[11px] text-ink-3 flex items-center justify-center gap-1.5">
               <Lock className="w-3.5 h-3.5 text-positive" />
-              <span>Grounded RAG workspace scoped to your verified Google email</span>
+              <span>Personal workspace scoped to your verified Google email</span>
+            </div>
+          </div>
+
+          {/* Feature Highlights Grid */}
+          <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="p-3.5 rounded-xl bg-surface/60 border border-line/80 flex flex-col gap-1.5">
+              <div className="w-7 h-7 rounded-lg bg-indigo-500/10 text-indigo-500 flex items-center justify-center">
+                <FileText className="w-3.5 h-3.5" />
+              </div>
+              <div className="text-xs font-semibold text-ink">Multi-PDF Search</div>
+              <div className="text-[11px] text-ink-3 leading-snug">
+                Embed and search across dozens of documents simultaneously.
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-surface/60 border border-line/80 flex flex-col gap-1.5">
+              <div className="w-7 h-7 rounded-lg bg-emerald-500/10 text-emerald-500 flex items-center justify-center">
+                <Sparkles className="w-3.5 h-3.5" />
+              </div>
+              <div className="text-xs font-semibold text-ink">Live Voice Agent</div>
+              <div className="text-[11px] text-ink-3 leading-snug">
+                Sub-second audio dialogue powered by Google Gemini.
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-surface/60 border border-line/80 flex flex-col gap-1.5">
+              <div className="w-7 h-7 rounded-lg bg-sky-500/10 text-sky-500 flex items-center justify-center">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+              </div>
+              <div className="text-xs font-semibold text-ink">Exact Citations</div>
+              <div className="text-[11px] text-ink-3 leading-snug">
+                Every answer references exact PDF page numbers and snippets.
+              </div>
             </div>
           </div>
 
@@ -376,15 +289,15 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           <div className="mt-6 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-ink-3">
             <span className="flex items-center gap-1.5">
               <CheckCircle2 className="w-3.5 h-3.5 text-positive" />
-              Real Google Sign-In
+              100% Free
             </span>
             <span className="flex items-center gap-1.5">
               <CheckCircle2 className="w-3.5 h-3.5 text-positive" />
-              100% Free Service
+              Official Google Sign-In
             </span>
             <span className="flex items-center gap-1.5">
               <CheckCircle2 className="w-3.5 h-3.5 text-positive" />
-              Private PDF Indexing
+              Private & Encrypted
             </span>
           </div>
         </div>
@@ -392,7 +305,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
       {/* Footer */}
       <footer className="relative z-10 py-4 border-t border-line/50 text-center text-[11px] text-ink-3">
-        Talk to Your PDFs • Real Google Account Authentication
+        Talk to Your PDFs • Google Account Authentication
       </footer>
     </div>
   );

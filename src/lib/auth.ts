@@ -10,9 +10,18 @@ const AUTH_STORAGE_KEY = "pdf_rag_google_auth_user";
 const GOOGLE_CLIENT_ID_KEY = "pdf_rag_google_client_id";
 
 /**
- * Retrieves the Google OAuth Client ID from localStorage or Vite environment variables.
+ * Permanent builder Google OAuth Client ID.
+ * Hardwired into the application for all users.
+ */
+export const BUILDER_GOOGLE_CLIENT_ID: string = "";
+
+/**
+ * Retrieves the Google OAuth Client ID from builder constant, localStorage, or environment.
  */
 export function getGoogleClientId(): string {
+  if (BUILDER_GOOGLE_CLIENT_ID && BUILDER_GOOGLE_CLIENT_ID.trim()) {
+    return BUILDER_GOOGLE_CLIENT_ID.trim();
+  }
   const custom = localStorage.getItem(GOOGLE_CLIENT_ID_KEY);
   if (custom && custom.trim()) {
     return custom.trim();
