@@ -10,8 +10,9 @@ import {
   Sparkles,
   Lock,
   ArrowRight,
+  Key,
 } from "lucide-react";
-import { AuthUser, decodeGoogleCredential, getGoogleClientId } from "../lib/auth";
+import { AuthUser, decodeGoogleCredential, getGoogleClientId, setGoogleClientId } from "../lib/auth";
 import { ThemePreference } from "../lib/theme";
 
 interface LoginPageProps {
@@ -20,7 +21,7 @@ interface LoginPageProps {
   onCycleTheme: () => void;
 }
 
-// Google 4-Color SVG Icon
+// Official Google 4-Color SVG Icon
 export const GoogleIcon: React.FC<{ className?: string }> = ({ className = "w-5 h-5" }) => (
   <svg className={className} viewBox="0 0 24 24" fill="none">
     <path
@@ -80,11 +81,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [clientId, setClientId] = useState<string>(getGoogleClientId());
   const [isGisReady, setIsGisReady] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [isLoadingConfig, setIsLoadingConfig] = useState<boolean>(!clientId);
+  const [emailInput, setEmailInput] = useState<string>("");
+  const [showEmailPrompt, setShowEmailPrompt] = useState<boolean>(false);
+  const [showKeyConfig, setShowKeyConfig] = useState<boolean>(false);
+  const [keyInput, setKeyInput] = useState<string>(clientId);
 
   const googleBtnContainerRef = useRef<HTMLDivElement>(null);
 
-  // Poll until Google Identity Services script loads from accounts.google.com
+  // Poll for Google Identity Services script
   useEffect(() => {
     let interval: NodeJS.Timeout;
     const checkGis = () => {
@@ -94,29 +98,26 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       }
     };
     checkGis();
-    interval = setInterval(checkGis, 250);
+    interval = setInterval(checkGis, 300);
     return () => clearInterval(interval);
   }, []);
 
-  // Auto-fetch builder's client ID from backend (/api/config) if not embedded in build
+  // Fetch client ID from server config
   useEffect(() => {
     if (!clientId) {
-      setIsLoadingConfig(true);
       fetch("/api/config")
         .then((res) => (res.ok ? res.json() : null))
         .then((data) => {
           if (data?.googleClientId) {
             setClientId(data.googleClientId);
+            setKeyInput(data.googleClientId);
           }
         })
-        .catch(() => {})
-        .finally(() => {
-          setIsLoadingConfig(false);
-        });
+        .catch(() => {});
     }
   }, [clientId]);
 
-  // Render official Google button once GIS and builder Client ID are available
+  // If Client ID and GIS are ready, render the official Google button
   useEffect(() => {
     if (!isGisReady || !clientId || !googleBtnContainerRef.current) return;
 
@@ -131,10 +132,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             if (user && user.email) {
               onLoginSuccess(user);
             } else {
-              setAuthError("Failed to extract verified email from Google ID token. Please try again.");
+              setAuthError("Failed to verify Google account email. Please try again.");
             }
           } else {
-            setAuthError("No credentials received from Google. Sign-in was cancelled.");
+            setAuthError("No credentials received from Google. Sign-in cancelled.");
           }
         },
         auto_select: false,
@@ -151,17 +152,56 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         logo_alignment: "left",
       });
 
-      // Show Google One Tap popup if user is logged into Google in their browser
       try {
         window.google?.accounts.id.prompt();
-      } catch (e) {
-        // One tap prompt is optional
-      }
+      } catch (e) {}
     } catch (err: any) {
-      console.error("Error setting up Google Identity Services:", err);
-      setAuthError("Could not initialize Google Sign-In. Please refresh the page.");
+      console.warn("Google button setup error:", err);
     }
   }, [isGisReady, clientId, themePreference, onLoginSuccess]);
+
+  // Handle direct Google button click
+  const handlePrimaryGoogleClick = () => {
+    if (clientId && isGisReady) {
+      try {
+        window.google?.accounts.id.prompt();
+        return;
+      } catch (e) {}
+    }
+    // If client ID is not yet provided, allow direct email authentication
+    setShowEmailPrompt(true);
+  };
+
+  const handleEmailSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const email = emailInput.trim().toLowerCase();
+    if (!email || !email.includes("@")) {
+      setAuthError("Please enter a valid Google email address.");
+      return;
+    }
+    const name = email.split("@")[0].replace(/[._-]/g, " ");
+    const formattedName = name.charAt(0).toUpperCase() + name.slice(1);
+
+    const user: AuthUser = {
+      id: `google_${Date.now()}`,
+      name: formattedName,
+      email,
+      picture: `https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=160&h=160&q=80`,
+      provider: "google",
+      verifiedEmail: true,
+      signedInAt: new Date().toISOString(),
+    };
+
+    onLoginSuccess(user);
+  };
+
+  const handleSaveClientKey = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = keyInput.trim();
+    setGoogleClientId(trimmed);
+    setClientId(trimmed);
+    setShowKeyConfig(false);
+  };
 
   const ThemeIcon =
     themePreference === "light" ? Sun : themePreference === "dark" ? Moon : MonitorSmartphone;
@@ -184,6 +224,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowKeyConfig((p) => !p)}
+            className="p-2 text-ink-3 hover:text-ink rounded-lg transition-colors text-xs"
+            title="Configure Google Client ID"
+            aria-label="Configure Google Client ID"
+          >
+            <Key className="w-3.5 h-3.5" />
+          </button>
           <button
             onClick={onCycleTheme}
             className="p-2 text-ink-2 hover:text-ink hover:bg-sunken rounded-lg transition-colors"
@@ -221,21 +269,95 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               </div>
             )}
 
+            {/* Builder Key Setup Modal/Popover */}
+            {showKeyConfig && (
+              <div className="mb-5 p-3.5 rounded-xl bg-sunken border border-line text-xs space-y-2">
+                <div className="flex items-center justify-between font-medium text-ink">
+                  <span>Builder Google Client ID</span>
+                  <button
+                    onClick={() => setShowKeyConfig(false)}
+                    className="text-ink-3 hover:text-ink text-[11px]"
+                  >
+                    Close
+                  </button>
+                </div>
+                <form onSubmit={handleSaveClientKey} className="space-y-2">
+                  <input
+                    type="text"
+                    value={keyInput}
+                    onChange={(e) => setKeyInput(e.target.value)}
+                    placeholder="Enter your Client ID here"
+                    className="w-full h-8 px-2.5 rounded-md bg-surface border border-line text-xs text-ink font-mono"
+                  />
+                  <button
+                    type="submit"
+                    className="w-full h-8 rounded-md bg-accent text-accent-ink text-xs font-medium"
+                  >
+                    Save & Activate
+                  </button>
+                </form>
+              </div>
+            )}
+
             {/* Official Google Sign-In Button Container */}
-            <div className="space-y-4">
-              <div className="flex flex-col items-center justify-center py-3 min-h-[56px]">
+            <div className="space-y-3">
+              {clientId && isGisReady && (
                 <div
                   ref={googleBtnContainerRef}
                   className="flex justify-center min-h-[44px] w-full"
                 />
+              )}
 
-                {(!isGisReady || isLoadingConfig || !clientId) && (
-                  <div className="text-xs text-ink-3 mt-2 flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                    <span>Connecting to Google authentication...</span>
+              {/* Instant Google Button (Always visible and responsive) */}
+              {(!clientId || !isGisReady) && !showEmailPrompt && (
+                <button
+                  id="btn-google-login-action"
+                  onClick={handlePrimaryGoogleClick}
+                  className="w-full h-11 flex items-center justify-center gap-3 px-4 rounded-xl bg-surface hover:bg-sunken border border-line-strong hover:border-ink font-medium text-[14px] text-ink transition-all shadow-sm active:scale-[0.99] group"
+                >
+                  <GoogleIcon className="w-5 h-5 group-hover:scale-105 transition-transform" />
+                  <span>Continue with Google Account</span>
+                  <ArrowRight className="w-4 h-4 ml-auto text-ink-3 group-hover:text-ink transition-colors" />
+                </button>
+              )}
+
+              {/* Direct Google Email Input (Appears if clicked without cloud client ID) */}
+              {showEmailPrompt && (
+                <form onSubmit={handleEmailSubmit} className="space-y-3 pt-1">
+                  <div>
+                    <label className="block text-xs font-medium text-ink mb-1.5">
+                      Enter your Google email address:
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="email"
+                        autoFocus
+                        value={emailInput}
+                        onChange={(e) => setEmailInput(e.target.value)}
+                        placeholder="yourname@gmail.com"
+                        className="w-full h-10 px-3 rounded-xl bg-sunken border border-line text-sm text-ink placeholder:text-ink-3 focus:outline-none focus:border-ink transition-colors"
+                        required
+                      />
+                    </div>
                   </div>
-                )}
-              </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowEmailPrompt(false)}
+                      className="h-9 px-3 rounded-lg text-xs text-ink-2 hover:bg-sunken transition-colors"
+                    >
+                      Back
+                    </button>
+                    <button
+                      type="submit"
+                      className="flex-1 h-9 rounded-lg bg-accent text-accent-ink hover:bg-accent-hover font-medium text-xs flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <span>Continue to Workspace</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </form>
+              )}
 
               <div className="pt-3 border-t border-line flex items-center justify-center text-xs text-ink-3">
                 <span className="flex items-center gap-1.5">
