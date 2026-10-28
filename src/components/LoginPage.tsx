@@ -11,8 +11,9 @@ import {
   Lock,
   ArrowRight,
   Key,
+  ExternalLink,
 } from "lucide-react";
-import { AuthUser, decodeGoogleCredential, getGoogleClientId, setGoogleClientId } from "../lib/auth";
+import { AuthUser, getGoogleClientId, setGoogleClientId } from "../lib/auth";
 import { ThemePreference } from "../lib/theme";
 
 interface LoginPageProps {
@@ -80,15 +81,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 }) => {
   const [clientId, setClientId] = useState<string>(getGoogleClientId());
   const [isGisReady, setIsGisReady] = useState<boolean>(false);
+  const [isVerifying, setIsVerifying] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [emailInput, setEmailInput] = useState<string>("");
-  const [showEmailPrompt, setShowEmailPrompt] = useState<boolean>(false);
-  const [showKeyConfig, setShowKeyConfig] = useState<boolean>(false);
+  const [showConfig, setShowConfig] = useState<boolean>(!clientId);
   const [keyInput, setKeyInput] = useState<string>(clientId);
 
   const googleBtnContainerRef = useRef<HTMLDivElement>(null);
 
-  // Poll for Google Identity Services script
+  // Poll for Google Identity Services script from Google
   useEffect(() => {
     let interval: NodeJS.Timeout;
     const checkGis = () => {
@@ -98,11 +98,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       }
     };
     checkGis();
-    interval = setInterval(checkGis, 300);
+    interval = setInterval(checkGis, 250);
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch client ID from server config
+  // Fetch client ID from backend if not yet in state
   useEffect(() => {
     if (!clientId) {
       fetch("/api/config")
@@ -111,13 +111,54 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           if (data?.googleClientId) {
             setClientId(data.googleClientId);
             setKeyInput(data.googleClientId);
+            setShowConfig(false);
           }
         })
         .catch(() => {});
     }
   }, [clientId]);
 
-  // If Client ID and GIS are ready, render the official Google button
+  // Authenticate and cryptographically verify Google ID token
+  const handleCredentialReceived = async (credential: string) => {
+    try {
+      setIsVerifying(true);
+      setAuthError(null);
+
+      const res = await fetch("/api/auth/verify-google", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id_token: credential }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || err.error || "Google authentication rejected.");
+      }
+
+      const verified = await res.json();
+      if (!verified.email) {
+        throw new Error("No verified email returned by Google.");
+      }
+
+      onLoginSuccess({
+        id: verified.sub || `google_${Date.now()}`,
+        name: verified.name || verified.email.split("@")[0],
+        email: verified.email,
+        picture: verified.picture || "",
+        provider: "google",
+        verifiedEmail: true,
+        signedInAt: new Date().toISOString(),
+        idToken: credential,
+      });
+    } catch (err: any) {
+      console.error("Verification error:", err);
+      setAuthError(err.message || "Failed to verify real Google identity.");
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  // Render official Google button once GIS and Client ID are active
   useEffect(() => {
     if (!isGisReady || !clientId || !googleBtnContainerRef.current) return;
 
@@ -128,14 +169,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         client_id: clientId,
         callback: (response: { credential: string }) => {
           if (response?.credential) {
-            const user = decodeGoogleCredential(response.credential);
-            if (user && user.email) {
-              onLoginSuccess(user);
-            } else {
-              setAuthError("Failed to verify Google account email. Please try again.");
-            }
+            handleCredentialReceived(response.credential);
           } else {
-            setAuthError("No credentials received from Google. Sign-in cancelled.");
+            setAuthError("Google Sign-In was cancelled.");
           }
         },
         auto_select: false,
@@ -156,51 +192,31 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         window.google?.accounts.id.prompt();
       } catch (e) {}
     } catch (err: any) {
-      console.warn("Google button setup error:", err);
+      console.warn("Google GIS init error:", err);
     }
-  }, [isGisReady, clientId, themePreference, onLoginSuccess]);
+  }, [isGisReady, clientId, themePreference]);
 
-  // Handle direct Google button click
-  const handlePrimaryGoogleClick = () => {
+  const handleSaveClientKey = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = keyInput.trim();
+    if (!trimmed) {
+      setAuthError("Please paste a valid Google OAuth Client ID.");
+      return;
+    }
+    setGoogleClientId(trimmed);
+    setClientId(trimmed);
+    setShowConfig(false);
+    setAuthError(null);
+  };
+
+  const handleManualGoogleClick = () => {
     if (clientId && isGisReady) {
       try {
         window.google?.accounts.id.prompt();
         return;
       } catch (e) {}
     }
-    // If client ID is not yet provided, allow direct email authentication
-    setShowEmailPrompt(true);
-  };
-
-  const handleEmailSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const email = emailInput.trim().toLowerCase();
-    if (!email || !email.includes("@")) {
-      setAuthError("Please enter a valid Google email address.");
-      return;
-    }
-    const name = email.split("@")[0].replace(/[._-]/g, " ");
-    const formattedName = name.charAt(0).toUpperCase() + name.slice(1);
-
-    const user: AuthUser = {
-      id: `google_${Date.now()}`,
-      name: formattedName,
-      email,
-      picture: `https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=160&h=160&q=80`,
-      provider: "google",
-      verifiedEmail: true,
-      signedInAt: new Date().toISOString(),
-    };
-
-    onLoginSuccess(user);
-  };
-
-  const handleSaveClientKey = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = keyInput.trim();
-    setGoogleClientId(trimmed);
-    setClientId(trimmed);
-    setShowKeyConfig(false);
+    setShowConfig(true);
   };
 
   const ThemeIcon =
@@ -225,7 +241,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setShowKeyConfig((p) => !p)}
+            onClick={() => setShowConfig((p) => !p)}
             className="p-2 text-ink-3 hover:text-ink rounded-lg transition-colors text-xs"
             title="Configure Google Client ID"
             aria-label="Configure Google Client ID"
@@ -257,7 +273,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 Sign in with Google
               </h1>
               <p className="text-ink-2 text-[13.5px] mt-1.5 leading-relaxed">
-                Continue with your Google account to access your document library and Gemini voice assistant.
+                Log in with your verified Google account to authenticate your real identity and access your documents.
               </p>
             </div>
 
@@ -269,100 +285,77 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               </div>
             )}
 
-            {/* Builder Key Setup Modal/Popover */}
-            {showKeyConfig && (
-              <div className="mb-5 p-3.5 rounded-xl bg-sunken border border-line text-xs space-y-2">
-                <div className="flex items-center justify-between font-medium text-ink">
-                  <span>Builder Google Client ID</span>
-                  <button
-                    onClick={() => setShowKeyConfig(false)}
-                    className="text-ink-3 hover:text-ink text-[11px]"
-                  >
-                    Close
-                  </button>
-                </div>
-                <form onSubmit={handleSaveClientKey} className="space-y-2">
-                  <input
-                    type="text"
-                    value={keyInput}
-                    onChange={(e) => setKeyInput(e.target.value)}
-                    placeholder="Enter your Client ID here"
-                    className="w-full h-8 px-2.5 rounded-md bg-surface border border-line text-xs text-ink font-mono"
-                  />
-                  <button
-                    type="submit"
-                    className="w-full h-8 rounded-md bg-accent text-accent-ink text-xs font-medium"
-                  >
-                    Save & Activate
-                  </button>
-                </form>
+            {/* Verification in progress spinner */}
+            {isVerifying && (
+              <div className="mb-5 p-3 rounded-xl bg-sunken border border-line text-xs flex items-center justify-center gap-2.5 text-ink">
+                <div className="w-3.5 h-3.5 rounded-full border-2 border-accent border-t-transparent animate-spin" />
+                <span>Verifying authentic Google identity with Google servers...</span>
               </div>
             )}
 
-            {/* Official Google Sign-In Button Container */}
-            <div className="space-y-3">
-              {clientId && isGisReady && (
-                <div
-                  ref={googleBtnContainerRef}
-                  className="flex justify-center min-h-[44px] w-full"
-                />
-              )}
-
-              {/* Instant Google Button (Always visible and responsive) */}
-              {(!clientId || !isGisReady) && !showEmailPrompt && (
-                <button
-                  id="btn-google-login-action"
-                  onClick={handlePrimaryGoogleClick}
-                  className="w-full h-11 flex items-center justify-center gap-3 px-4 rounded-xl bg-surface hover:bg-sunken border border-line-strong hover:border-ink font-medium text-[14px] text-ink transition-all shadow-sm active:scale-[0.99] group"
-                >
-                  <GoogleIcon className="w-5 h-5 group-hover:scale-105 transition-transform" />
-                  <span>Continue with Google Account</span>
-                  <ArrowRight className="w-4 h-4 ml-auto text-ink-3 group-hover:text-ink transition-colors" />
-                </button>
-              )}
-
-              {/* Direct Google Email Input (Appears if clicked without cloud client ID) */}
-              {showEmailPrompt && (
-                <form onSubmit={handleEmailSubmit} className="space-y-3 pt-1">
-                  <div>
-                    <label className="block text-xs font-medium text-ink mb-1.5">
-                      Enter your Google email address:
-                    </label>
-                    <div className="relative">
-                      <input
-                        type="email"
-                        autoFocus
-                        value={emailInput}
-                        onChange={(e) => setEmailInput(e.target.value)}
-                        placeholder="yourname@gmail.com"
-                        className="w-full h-10 px-3 rounded-xl bg-sunken border border-line text-sm text-ink placeholder:text-ink-3 focus:outline-none focus:border-ink transition-colors"
-                        required
-                      />
-                    </div>
+            {/* If Client ID is missing, show builder configuration form */}
+            {!clientId || showConfig ? (
+              <div className="space-y-4 mb-4">
+                <div className="p-3.5 rounded-xl bg-sunken border border-line text-xs space-y-2">
+                  <div className="flex items-center justify-between font-medium text-ink">
+                    <span className="flex items-center gap-1.5">
+                      <Key className="w-3.5 h-3.5 text-accent" />
+                      <span>Google OAuth Client ID</span>
+                    </span>
+                    {clientId && (
+                      <button
+                        onClick={() => setShowConfig(false)}
+                        className="text-ink-3 hover:text-ink text-[11px]"
+                      >
+                        Hide
+                      </button>
+                    )}
                   </div>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setShowEmailPrompt(false)}
-                      className="h-9 px-3 rounded-lg text-xs text-ink-2 hover:bg-sunken transition-colors"
-                    >
-                      Back
-                    </button>
+                  <p className="text-ink-2 text-[11.5px] leading-relaxed">
+                    Google requires a Client ID from your Google Cloud Console so it can open the real Google authentication popup:
+                  </p>
+                  <form onSubmit={handleSaveClientKey} className="space-y-2.5 pt-1">
+                    <input
+                      type="text"
+                      value={keyInput}
+                      onChange={(e) => setKeyInput(e.target.value)}
+                      placeholder="e.g. 123456789-abcdef.apps.googleusercontent.com"
+                      className="w-full h-9 px-3 rounded-lg bg-surface border border-line text-xs text-ink font-mono focus:outline-none focus:border-ink transition-colors"
+                      required
+                    />
                     <button
                       type="submit"
-                      className="flex-1 h-9 rounded-lg bg-accent text-accent-ink hover:bg-accent-hover font-medium text-xs flex items-center justify-center gap-1.5 transition-colors"
+                      className="w-full h-9 rounded-lg bg-accent text-accent-ink hover:bg-accent-hover text-xs font-medium flex items-center justify-center gap-1.5 transition-colors"
                     >
-                      <span>Continue to Workspace</span>
-                      <ArrowRight className="w-3.5 h-3.5" />
+                      <GoogleIcon className="w-3.5 h-3.5" />
+                      <span>Activate Real Google Sign-In</span>
                     </button>
-                  </div>
-                </form>
-              )}
+                  </form>
+                </div>
+              </div>
+            ) : null}
+
+            {/* Official Google Sign-In Button */}
+            <div className="space-y-3">
+              <div className="flex justify-center min-h-[44px] w-full">
+                {clientId && isGisReady ? (
+                  <div ref={googleBtnContainerRef} className="flex justify-center w-full" />
+                ) : (
+                  <button
+                    onClick={handleManualGoogleClick}
+                    className="w-full h-11 flex items-center justify-center gap-3 px-4 rounded-xl bg-surface hover:bg-sunken border border-line-strong hover:border-ink font-medium text-[14px] text-ink transition-all shadow-sm active:scale-[0.99] group"
+                  >
+                    <GoogleIcon className="w-5 h-5 group-hover:scale-105 transition-transform" />
+                    <span>Continue with Google</span>
+                    <ArrowRight className="w-4 h-4 ml-auto text-ink-3 group-hover:text-ink transition-colors" />
+                  </button>
+                )}
+              </div>
 
               <div className="pt-3 border-t border-line flex items-center justify-center text-xs text-ink-3">
                 <span className="flex items-center gap-1.5">
                   <ShieldCheck className="w-3.5 h-3.5 text-positive shrink-0" />
-                  <span>Verified Google Account Authentication</span>
+                  <span>Cryptographically Verified by Google OAuth</span>
                 </span>
               </div>
             </div>
@@ -370,7 +363,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             {/* Privacy & Authentication Guarantee */}
             <div className="mt-5 pt-4 border-t border-line text-center text-[11px] text-ink-3 flex items-center justify-center gap-1.5">
               <Lock className="w-3.5 h-3.5 text-positive" />
-              <span>Personal workspace scoped to your verified Google email</span>
+              <span>Identity verified via official Google ID token</span>
             </div>
           </div>
 

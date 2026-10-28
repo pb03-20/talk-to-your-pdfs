@@ -55,6 +55,35 @@ async function startServer() {
     });
   });
 
+  app.post("/api/auth/verify-google", async (req, res) => {
+    try {
+      const token = req.body?.id_token;
+      if (!token) {
+        return res.status(400).json({ error: "Missing Google ID token" });
+      }
+      const googleRes = await fetch(
+        `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(token)}`
+      );
+      if (!googleRes.ok) {
+        return res.status(401).json({ error: "Google verification failed" });
+      }
+      const data = await googleRes.json();
+      if (!data.email || String(data.email_verified).toLowerCase() !== "true") {
+        return res.status(401).json({ error: "Google email not verified" });
+      }
+      return res.json({
+        success: true,
+        verified: true,
+        email: data.email.toLowerCase(),
+        name: data.name || data.email.split("@")[0],
+        picture: data.picture || "",
+        sub: data.sub,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
   // Get current workspace status, documents, and messages
   app.get("/api/workspace", (req, res) => {
     const wsId = getWorkspaceId(req);
