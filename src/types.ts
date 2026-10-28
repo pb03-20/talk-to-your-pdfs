@@ -43,3 +43,15 @@ export interface WorkspaceInfo {
   totalChunks: number;
   messages: ChatMessage[];
 }
+
+export interface AuthUser {
+  id: string; // Google sub (user ID)
+  name: string;
+  email: string;
+  picture?: string;
+  provider: "google";
+  verifiedEmail?: boolean;
+  signedInAt: string;
+  idToken?: string;
+}
+

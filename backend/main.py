@@ -162,6 +162,11 @@ class TTSRequest(BaseModel):
 def health_check():
     return {"status": "ok", "service": "Talk to Your PDFs FastAPI"}
 
+@app.get("/api/config")
+def get_public_config():
+    client_id = os.getenv("VITE_GOOGLE_CLIENT_ID", "") or os.getenv("GOOGLE_CLIENT_ID", "")
+    return {"googleClientId": client_id}
+
 @app.get("/api/workspace")
 def get_workspace(x_workspace_id: Optional[str] = Header("default")):
     ws = get_or_create_workspace(x_workspace_id)

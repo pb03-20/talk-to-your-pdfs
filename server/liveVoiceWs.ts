@@ -261,10 +261,10 @@ ${languageRule}`;
               realtimeInputConfig: {
                 automaticActivityDetection: {
                   disabled: false,
-                  startOfSpeechSensitivity: "START_SENSITIVITY_MEDIUM" as any,
-                  endOfSpeechSensitivity: "END_SENSITIVITY_LOW" as any,
+                  startOfSpeechSensitivity: "START_SENSITIVITY_MEDIUM",
+                  endOfSpeechSensitivity: "END_SENSITIVITY_LOW",
                   silenceDuration: { seconds: 1, nanos: 200000000 }, // 1.2s
-                },
+                } as any,
               },
               systemInstruction,
             },

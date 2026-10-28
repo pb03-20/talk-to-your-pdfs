@@ -8,23 +8,23 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatArea } from "./components/ChatArea";
 import { VoiceModal } from "./components/VoiceModal";
 import { CitationModal } from "./components/CitationModal";
-import { DocumentMetadata, ChatMessage, SourceCitation } from "./types";
+import { LoginPage } from "./components/LoginPage";
+import { DocumentMetadata, ChatMessage, SourceCitation, AuthUser } from "./types";
 import { LiveAudioPlayer, speakWithBrowser, stopBrowserSpeech } from "./lib/audioUtils";
 import { useTheme } from "./lib/theme";
+import { getStoredUser, setStoredUser, clearStoredUser, getUserWorkspaceId } from "./lib/auth";
 
-function getOrInitWorkspaceId(): string {
-  const key = "pdf_rag_workspace_id";
-  let id = localStorage.getItem(key);
-  if (!id) {
-    id = `ws_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    localStorage.setItem(key, id);
+function getInitialWorkspaceId(user: AuthUser | null): string {
+  if (user && user.email) {
+    return getUserWorkspaceId(user.email);
   }
-  return id;
+  return "ws_guest";
 }
 
 export default function App() {
   const { preference: themePreference, cycleTheme } = useTheme();
-  const [workspaceId, setWorkspaceId] = useState<string>(getOrInitWorkspaceId);
+  const [user, setUser] = useState<AuthUser | null>(() => getStoredUser());
+  const [workspaceId, setWorkspaceId] = useState<string>(() => getInitialWorkspaceId(getStoredUser()));
   const [documents, setDocuments] = useState<DocumentMetadata[]>([]);
   const [totalChunks, setTotalChunks] = useState<number>(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -351,6 +351,31 @@ export default function App() {
     };
   }, []);
 
+  const handleLoginSuccess = (loggedInUser: AuthUser) => {
+    setUser(loggedInUser);
+    setStoredUser(loggedInUser);
+    const userWs = getUserWorkspaceId(loggedInUser.email);
+    setWorkspaceId(userWs);
+  };
+
+  const handleSignOut = () => {
+    handleStopTTS();
+    setIsVoiceOpen(false);
+    clearStoredUser();
+    setUser(null);
+  };
+
+  // If not logged in, show the Google Authentication Page
+  if (!user) {
+    return (
+      <LoginPage
+        onLoginSuccess={handleLoginSuccess}
+        themePreference={themePreference}
+        onCycleTheme={cycleTheme}
+      />
+    );
+  }
+
   return (
     <div className="h-screen w-full flex flex-col bg-canvas text-ink overflow-hidden">
       {/* Top Header */}
@@ -364,6 +389,8 @@ export default function App() {
         isVoiceActive={isVoiceOpen}
         themePreference={themePreference}
         onCycleTheme={cycleTheme}
+        user={user}
+        onSignOut={handleSignOut}
       />
 
       {/* Main Container */}

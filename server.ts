@@ -49,6 +49,12 @@ async function startServer() {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
+  app.get("/api/config", (req, res) => {
+    res.json({
+      googleClientId: process.env.VITE_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || "",
+    });
+  });
+
   // Get current workspace status, documents, and messages
   app.get("/api/workspace", (req, res) => {
     const wsId = getWorkspaceId(req);

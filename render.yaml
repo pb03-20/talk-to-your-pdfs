@@ -14,3 +14,7 @@ services:
         value: document_chunks
       - key: MONGODB_VECTOR_INDEX
         value: vector_index
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: VITE_GOOGLE_CLIENT_ID
+        sync: false
