@@ -13,7 +13,7 @@ const GOOGLE_CLIENT_ID_KEY = "pdf_rag_google_client_id";
  * Permanent builder Google OAuth Client ID.
  * Hardwired into the application for all users.
  */
-export const BUILDER_GOOGLE_CLIENT_ID: string = "";
+export const BUILDER_GOOGLE_CLIENT_ID: string = "775526888744-alvftk2m5dc68kl5d6sbqeh6ggso2t77.apps.googleusercontent.com";
 
 /**
  * Retrieves the Google OAuth Client ID from builder constant, localStorage, or environment.
